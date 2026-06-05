@@ -100,9 +100,27 @@ export class Notice {
 /** No-op path normalizer. Production Obsidian replaces this with platform-aware logic. */
 export const normalizePath = (s: string): string => s;
 
+/** Minimal TFile stub — only the `path` property is required by FileWatcher. */
+export class TFile {
+  constructor(public path: string) {}
+}
+
+/** Opaque event reference returned by vault.on(). */
+export type EventRef = { event: string; id: number };
+
+/** Minimal vault stub that supports on/offref for FileWatcher tests. */
+export class VaultStub {
+  getName() { return 'TestVault'; }
+  /** No-op: tests call FileWatcher.queueUpload() directly, not via vault events. */
+  on(event: string, _cb: (file: unknown) => void): EventRef {
+    return { event, id: Math.random() };
+  }
+  offref(_ref: EventRef): void { /* no-op */ }
+}
+
 // Minimal App stub
 export class App {
-  vault = { getName: () => 'TestVault' };
+  vault: VaultStub = new VaultStub();
 }
 
 // Minimal Plugin stub
