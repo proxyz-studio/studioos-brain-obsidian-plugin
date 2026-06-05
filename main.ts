@@ -3,6 +3,7 @@ import { BrainApiClient } from './src/api/client';
 import { ConnectModal } from './src/connect/ConnectModal';
 import { HeartbeatScheduler } from './src/lifecycle/HeartbeatScheduler';
 import { ChangesSyncer } from './src/sync/ChangesSyncer';
+import { FileWatcher } from './src/sync/FileWatcher';
 import { ObsidianVaultWriter } from './src/sync/VaultWriter';
 
 type StudioOsBrainSettings = {
@@ -30,6 +31,10 @@ export default class StudioOsBrainPlugin extends Plugin {
   api!: BrainApiClient;
   private heartbeat: HeartbeatScheduler | null = null;
   private changesSyncer: ChangesSyncer | null = null;
+  private fileWatcher: FileWatcher | null = null;
+  /** In-memory map from brain_id → last known server content_hash.
+   *  Populated by /changes responses. Used by FileWatcher to build Flow C payloads. */
+  private brainIdHashes = new Map<string, string>();
 
   async onload() {
     await this.loadSettings();
@@ -40,10 +45,11 @@ export default class StudioOsBrainPlugin extends Plugin {
       vaultId: this.settings.vaultId,
     });
 
-    // If already connected, start heartbeat + changes syncer immediately
+    // If already connected, start heartbeat + changes syncer + file watcher immediately
     if (this.settings.token) {
       this.startHeartbeat();
       this.startChangesSyncer();
+      this.startFileWatcher();
     }
 
     this.addSettingTab(new StudioOsBrainSettingTab(this.app, this));
@@ -73,6 +79,7 @@ export default class StudioOsBrainPlugin extends Plugin {
   onunload() {
     this.heartbeat?.stop();
     this.changesSyncer?.stop();
+    this.fileWatcher?.stop();
     console.log('[StudioOS Brain] unloaded');
   }
 
@@ -133,6 +140,14 @@ export default class StudioOsBrainPlugin extends Plugin {
       onError: (err) => {
         console.error('[StudioOS Brain] sync error:', err);
       },
+      onChangeApplied: (change) => {
+        // Update in-memory hash map so FileWatcher can compute Flow C payloads.
+        if (change.id && change.content_hash && !change.deleted_at) {
+          this.brainIdHashes.set(change.id, change.content_hash);
+        } else if (change.deleted_at) {
+          this.brainIdHashes.delete(change.id);
+        }
+      },
     });
     this.changesSyncer.start();
   }
@@ -140,6 +155,26 @@ export default class StudioOsBrainPlugin extends Plugin {
   stopChangesSyncer() {
     this.changesSyncer?.stop();
     this.changesSyncer = null;
+  }
+
+  startFileWatcher() {
+    if (this.fileWatcher) return; // idempotent
+    this.fileWatcher = new FileWatcher({
+      app: this.app,
+      api: this.api,
+      writer: new ObsidianVaultWriter(this.app),
+      newRequestId: () => crypto.randomUUID(),
+      getLastKnownServerHash: (brainId) => this.brainIdHashes.get(brainId) ?? null,
+      onError: (msg, err) => {
+        console.warn('[StudioOS Brain] upload skipped:', msg, err);
+      },
+    });
+    this.fileWatcher.start();
+  }
+
+  stopFileWatcher() {
+    this.fileWatcher?.stop();
+    this.fileWatcher = null;
   }
 }
 
@@ -177,6 +212,7 @@ class StudioOsBrainSettingTab extends PluginSettingTab {
             .onClick(async () => {
               this.plugin.stopHeartbeat();
               this.plugin.stopChangesSyncer();
+              this.plugin.stopFileWatcher();
               this.plugin.settings.token = null;
               this.plugin.settings.vaultId = null;
               this.plugin.settings.vaultName = null;
@@ -205,6 +241,7 @@ class StudioOsBrainSettingTab extends PluginSettingTab {
                   this.plugin.api.setAuth(token, vaultId);
                   this.plugin.startHeartbeat();
                   this.plugin.startChangesSyncer();
+                  this.plugin.startFileWatcher();
                   this.display(); // re-render the tab
                 },
               }).open();

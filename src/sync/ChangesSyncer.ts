@@ -17,6 +17,10 @@ export type ChangesSyncerOpts = {
   /** Optional: called on any thrown/network error so caller can surface to user. */
   onError?: (err: unknown) => void;
 
+  /** Optional: called for each change row applied to the vault (after write/delete).
+   *  Caller uses this to maintain the brain_id → content_hash map for upstream sync. */
+  onChangeApplied?: (change: ChangeRow) => void;
+
   /** Poll interval in ms. Default 60 seconds. */
   intervalMs?: number;
 
@@ -95,6 +99,7 @@ export class ChangesSyncer {
       } else {
         await this.opts.writer.write(ch.path, ch.content);
       }
+      this.opts.onChangeApplied?.(ch);
     }
   }
 }
