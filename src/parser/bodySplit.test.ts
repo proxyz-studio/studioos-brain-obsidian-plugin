@@ -68,6 +68,23 @@ describe('splitBodyAtDelimiter', () => {
     expect(DELIM).toBe('<!-- ↑ Brain-managed. Edit your own notes below. ↓ -->');
   });
 
+  it('multiple leading blank lines before My notes header → same output as server (aligned regex)', () => {
+    // Server's extractUserNotesSection uses /^\s+/ which strips ALL leading whitespace including
+    // multiple blank lines. Previously the plugin used /^\s*\n/ which only stripped ONE line.
+    const body = [
+      'Brain content.',
+      DELIM,
+      '',
+      '',
+      '## My notes',
+      'user content here',
+    ].join('\n');
+    const result = splitBodyAtDelimiter(body);
+    // Should strip ALL leading blank lines + the header, leaving only the user content
+    expect(result.userNotes).toBe('user content here');
+    expect(result.userNotes).not.toContain('## My notes');
+  });
+
   it('does not include the delimiter itself in brainManaged or userNotes', () => {
     const body = `Above.\n${DELIM}\nBelow.`;
     const result = splitBodyAtDelimiter(body);
