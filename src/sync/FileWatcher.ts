@@ -26,6 +26,8 @@ export type FileWatcherOpts = {
   _setTimeout?: typeof setTimeout;
   _clearTimeout?: typeof clearTimeout;
   _now?: () => Date;
+  /** Test-only wall-clock override for suppression logic. Default: Date.now */
+  _nowMs?: () => number;
 };
 
 export class FileWatcher {
@@ -35,12 +37,18 @@ export class FileWatcher {
   private setTimeoutFn: typeof setTimeout;
   private clearTimeoutFn: typeof clearTimeout;
   private nowFn: () => Date;
+  private nowMsFn: () => number;
+  /** In-flight flush paths — prevents concurrent flushes for the same path (M1). */
+  private inFlight = new Set<string>();
+  /** Suppress upload of paths written by ChangesSyncer to break the sync loop (M2). */
+  private suppressUntil = new Map<string, number>();
 
   constructor(opts: FileWatcherOpts) {
     this.opts = opts;
     this.setTimeoutFn = opts._setTimeout ?? setTimeout;
     this.clearTimeoutFn = opts._clearTimeout ?? clearTimeout;
     this.nowFn = opts._now ?? (() => new Date());
+    this.nowMsFn = opts._nowMs ?? (() => Date.now());
   }
 
   start() {
@@ -62,12 +70,17 @@ export class FileWatcher {
     this.pending.clear();
   }
 
-  /** Queue a file for debounced upload. Public for direct testing.
-   *  Returns the pending flush promise if one was scheduled (for test awaiting). */
+  /** Queue a file for debounced upload. Public for direct testing. */
   queueUpload(path: string): void {
     const normalized = normalizePath(path);
     if (!normalized.startsWith(`${BRAIN_FOLDER}/`)) return;
-    if (normalized.includes(' (conflict ')) return; // skip conflict files
+    // Check server-write suppression to break the ChangesSyncer → FileWatcher loop (M2)
+    const suppressedUntil = this.suppressUntil.get(normalized);
+    if (suppressedUntil !== undefined) {
+      if (suppressedUntil > this.nowMsFn()) return;
+      // Suppression expired — clean up and proceed
+      this.suppressUntil.delete(normalized);
+    }
     const prev = this.pending.get(normalized);
     if (prev !== undefined) this.clearTimeoutFn(prev);
     const timer = this.setTimeoutFn(() => {
@@ -75,6 +88,13 @@ export class FileWatcher {
       void this.flush(normalized);
     }, DEBOUNCE_MS);
     this.pending.set(normalized, timer);
+  }
+
+  /** Suppress upload events for `path` for `durationMs` milliseconds.
+   *  Called by ChangesSyncer's onChangeApplied to prevent re-uploading server writes (M2). */
+  suppressPath(path: string, durationMs = 2000): void {
+    const normalized = normalizePath(path);
+    this.suppressUntil.set(normalized, this.nowMsFn() + durationMs);
   }
 
   private queueIfInBrainFolder(file: unknown): void {
@@ -91,6 +111,9 @@ export class FileWatcher {
 
   /** Exposed for test assertions — tests can call this directly to skip the debounce. */
   async flush(path: string): Promise<void> {
+    // In-flight guard: skip concurrent flushes for the same path (M1)
+    if (this.inFlight.has(path)) return;
+    this.inFlight.add(path);
     try {
       const exists = await this.opts.writer.exists(path);
       if (!exists) return; // file deleted between queue and flush
@@ -115,7 +138,7 @@ export class FileWatcher {
       }
 
       if (decision.kind === 'flowB') {
-        const r = await this.opts.api.uploadFlowB(decision.payload);
+        const r = await this.opts.api.uploadFlowB(decision.payload, decision.idempotencyKey);
         if (!r.ok) this.opts.onError?.(`Upload failed: ${r.code}`, new Error(r.code));
         return;
       }
@@ -139,6 +162,8 @@ export class FileWatcher {
       }
     } catch (err) {
       this.opts.onError?.('Sync upload threw', err);
+    } finally {
+      this.inFlight.delete(path);
     }
   }
 }

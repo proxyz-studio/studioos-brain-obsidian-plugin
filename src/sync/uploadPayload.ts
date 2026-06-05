@@ -4,7 +4,7 @@ import { splitBodyAtDelimiter } from '../parser/bodySplit';
 import type { UploadFlowB, UploadFlowC } from '../api/types';
 
 export type UploadDecision =
-  | { kind: 'flowB'; payload: UploadFlowB }
+  | { kind: 'flowB'; payload: UploadFlowB; idempotencyKey: string }
   | { kind: 'flowC'; payload: UploadFlowC }
   | { kind: 'skip'; reason: string };
 
@@ -21,15 +21,18 @@ export async function buildUploadPayload(args: {
   const brainId = typeof frontmatter.brain_id === 'string' ? frontmatter.brain_id : null;
 
   if (!brainId) {
-    // Flow B — new file, server creates a fresh row
+    // Flow B — new file, server creates a fresh row.
+    // content_hash = SHA256(content) since the full content IS the user notes for a fresh upload.
+    const contentHash = await sha256Hex(args.content);
     return {
       kind: 'flowB',
       payload: {
         path: args.path,
         content: args.content,
         source_type: 'note',
-        request_uuid: args.requestUuid,
+        content_hash: contentHash,
       },
+      idempotencyKey: args.requestUuid,
     };
   }
 
@@ -49,6 +52,7 @@ export async function buildUploadPayload(args: {
     kind: 'flowC',
     payload: {
       brain_id: brainId,
+      path: args.path,
       content: userNotes,
       content_hash: contentHash,
       last_known_server_hash: args.lastKnownServerHash,

@@ -142,11 +142,13 @@ export default class StudioOsBrainPlugin extends Plugin {
       },
       onChangeApplied: (change) => {
         // Update in-memory hash map so FileWatcher can compute Flow C payloads.
-        if (change.id && change.content_hash && !change.deleted_at) {
-          this.brainIdHashes.set(change.id, change.content_hash);
-        } else if (change.deleted_at) {
-          this.brainIdHashes.delete(change.id);
+        if (change.op === 'upsert') {
+          this.brainIdHashes.set(change.brain_id, change.content_hash);
+        } else {
+          this.brainIdHashes.delete(change.brain_id);
         }
+        // Suppress re-upload of the path ChangesSyncer just wrote to break the sync loop (M2).
+        if (change.path) this.fileWatcher?.suppressPath(change.path);
       },
     });
     this.changesSyncer.start();

@@ -6,7 +6,7 @@ import { BRAIN_MANAGED_DELIMITER } from '../parser/frontmatter';
 const DELIM = BRAIN_MANAGED_DELIMITER;
 
 describe('buildUploadPayload', () => {
-  it('file with no frontmatter → Flow B with full content + request_uuid', async () => {
+  it('file with no frontmatter → Flow B with full content + content_hash + idempotencyKey', async () => {
     const content = 'Just a plain note with no frontmatter.';
     const result = await buildUploadPayload({
       path: '05-BRAIN/note.md',
@@ -17,9 +17,14 @@ describe('buildUploadPayload', () => {
     expect(result.kind).toBe('flowB');
     if (result.kind === 'flowB') {
       expect(result.payload.content).toBe(content);
-      expect(result.payload.request_uuid).toBe('uuid-1');
       expect(result.payload.path).toBe('05-BRAIN/note.md');
       expect(result.payload.source_type).toBe('note');
+      // content_hash = SHA256(content) for fresh uploads
+      const expectedHash = await sha256Hex(content);
+      expect(result.payload.content_hash).toBe(expectedHash);
+      // idempotencyKey lives on the decision, not the payload body
+      expect(result.idempotencyKey).toBe('uuid-1');
+      expect((result.payload as Record<string, unknown>).request_uuid).toBeUndefined();
     }
   });
 
@@ -37,7 +42,7 @@ describe('buildUploadPayload', () => {
     }
   });
 
-  it('file with brain_id + known last_known_server_hash → Flow C with extracted userNotes + hash', async () => {
+  it('file with brain_id + known last_known_server_hash → Flow C with path + extracted userNotes + hash', async () => {
     const userNotes = 'my personal notes here';
     const content = [
       '---',
@@ -61,6 +66,7 @@ describe('buildUploadPayload', () => {
     expect(result.kind).toBe('flowC');
     if (result.kind === 'flowC') {
       expect(result.payload.brain_id).toBe('abc-123');
+      expect(result.payload.path).toBe('05-BRAIN/item.md');
       expect(result.payload.content).toBe(userNotes);
       expect(result.payload.last_known_server_hash).toBe('prev-hash-abc');
       // Hash should be SHA-256 of userNotes only

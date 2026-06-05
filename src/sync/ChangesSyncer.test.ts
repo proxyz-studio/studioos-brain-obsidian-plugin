@@ -9,12 +9,12 @@ import type { ChangeRow, ChangesResponse } from '../api/types';
 
 function makeRow(overrides: Partial<ChangeRow> = {}): ChangeRow {
   return {
-    id: 'id-1',
+    brain_id: 'id-1',
+    op: 'upsert',
     path: '05-BRAIN/note.md',
     content: '# Hello',
     content_hash: 'abc123',
     sync_version: 1,
-    deleted_at: null,
     updated_at: '2026-06-01T00:00:00.000Z',
     ...overrides,
   };
@@ -128,8 +128,8 @@ describe('ChangesSyncer', () => {
 
   // 2. 200 with 2 changes calls writer.write for each
   it('writes each non-deleted change to the vault', async () => {
-    const row1 = makeRow({ id: 'a', path: '05-BRAIN/a.md', content: 'content a' });
-    const row2 = makeRow({ id: 'b', path: '05-BRAIN/b.md', content: 'content b' });
+    const row1 = makeRow({ brain_id: 'a', path: '05-BRAIN/a.md', content: 'content a' });
+    const row2 = makeRow({ brain_id: 'b', path: '05-BRAIN/b.md', content: 'content b' });
     const opts = makeOpts(
       makeChangesResult({ data: { changes: [row1, row2], etag: '"e"' } }),
     );
@@ -141,11 +141,11 @@ describe('ChangesSyncer', () => {
   });
 
   // 3. deleted change calls writer.delete
-  it('deletes a file when deleted_at is set', async () => {
+  it('deletes a file when op is delete', async () => {
     // Pre-seed a file so delete can remove it
     const w = new MemoryVaultWriter();
     await w.write('05-BRAIN/gone.md', 'old content');
-    const deletedRow = makeRow({ path: '05-BRAIN/gone.md', deleted_at: '2026-06-01T00:00:01.000Z' });
+    const deletedRow = makeRow({ path: '05-BRAIN/gone.md', op: 'delete' });
     const opts = makeOpts(
       makeChangesResult({ data: { changes: [deletedRow], etag: '"e"' } }),
       { writer: w },
@@ -160,8 +160,8 @@ describe('ChangesSyncer', () => {
   it('saves cursor with max updated_at and new etag after 200', async () => {
     const rows = [
       makeRow({ updated_at: '2026-06-01T00:00:01.000Z' }),
-      makeRow({ id: 'id-2', path: '05-BRAIN/b.md', updated_at: '2026-06-02T00:00:00.000Z' }),
-      makeRow({ id: 'id-3', path: '05-BRAIN/c.md', updated_at: '2026-05-30T00:00:00.000Z' }),
+      makeRow({ brain_id: 'id-2', path: '05-BRAIN/b.md', updated_at: '2026-06-02T00:00:00.000Z' }),
+      makeRow({ brain_id: 'id-3', path: '05-BRAIN/c.md', updated_at: '2026-05-30T00:00:00.000Z' }),
     ];
     const opts = makeOpts(
       makeChangesResult({ data: { changes: rows, etag: '"new-etag"' } }),

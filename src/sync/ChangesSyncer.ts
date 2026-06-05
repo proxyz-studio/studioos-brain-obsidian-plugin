@@ -94,11 +94,12 @@ export class ChangesSyncer {
   private async applyChanges(changes: ChangeRow[]): Promise<void> {
     for (const ch of changes) {
       if (!ch.path) continue; // unstamped — server should have filtered (D11), defensive
-      if (ch.deleted_at) {
+      if (ch.op === 'delete') {
         await this.opts.writer.delete(ch.path);
       } else {
         await this.opts.writer.write(ch.path, ch.content);
       }
+      // Notify caller so brain_id → hash map stays current for Flow C uploads
       this.opts.onChangeApplied?.(ch);
     }
   }

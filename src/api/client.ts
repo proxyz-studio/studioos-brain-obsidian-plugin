@@ -90,10 +90,14 @@ export class BrainApiClient {
     return (await r.json()) as FileResponse;
   }
 
-  async uploadFlowB(payload: UploadFlowB): Promise<UploadSuccess | UploadError> {
+  async uploadFlowB(payload: UploadFlowB, idempotencyKey: string): Promise<UploadSuccess | UploadError> {
     const r = await this.fetcher(`${this.baseUrl}/api/brain/sync/upload`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-idempotency-key': idempotencyKey,
+        ...this.authHeaders(),
+      },
       body: JSON.stringify(payload),
     });
     const j = await r.json().catch(() => ({}));

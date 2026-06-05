@@ -142,12 +142,12 @@ describe('BrainApiClient.heartbeat', () => {
 
 describe('BrainApiClient.getChanges', () => {
   const sampleChange: ChangeRow = {
-    id: 'brain_1',
+    brain_id: 'brain_1',
+    op: 'upsert',
     path: 'Notes/foo.md',
     content: '# Foo',
     content_hash: 'abc123',
     sync_version: 1,
-    deleted_at: null,
     updated_at: '2026-06-06T00:00:00Z',
   };
 
@@ -207,7 +207,7 @@ describe('BrainApiClient.getChanges', () => {
 describe('BrainApiClient.getFile', () => {
   it('returns FileResponse on 200', async () => {
     const body: FileResponse = {
-      id: 'brain_1',
+      brain_id: 'brain_1',
       path: 'Notes/foo.md',
       content: '# Foo',
       content_hash: 'abc',
@@ -217,7 +217,7 @@ describe('BrainApiClient.getFile', () => {
     const client = makeAuthedClient(mock);
     const result = await client.getFile('brain_1');
     expect(result).not.toBeNull();
-    expect(result?.id).toBe('brain_1');
+    expect(result?.brain_id).toBe('brain_1');
     expect(result?.content_hash).toBe('abc');
   });
 
@@ -230,7 +230,7 @@ describe('BrainApiClient.getFile', () => {
 
   it('URL-encodes the brainId', async () => {
     const mock = vi.fn().mockResolvedValue(makeResponse(200, {
-      id: 'brain/special',
+      brain_id: 'brain/special',
       path: 'p',
       content: 'c',
       content_hash: 'h',
@@ -252,12 +252,10 @@ describe('BrainApiClient.uploadFlowB', () => {
     const body = { ok: true, brain_id: 'brain_1', content_hash: 'hash_1', sync_version: 1 };
     const mock = vi.fn().mockResolvedValue(makeResponse(201, body));
     const client = makeAuthedClient(mock);
-    const result = await client.uploadFlowB({
-      path: 'Notes/foo.md',
-      content: '# Foo',
-      source_type: 'note',
-      request_uuid: 'uuid-1',
-    });
+    const result = await client.uploadFlowB(
+      { path: 'Notes/foo.md', content: '# Foo', source_type: 'note', content_hash: 'hash_1' },
+      'idem-key-1',
+    );
     expect(result.ok).toBe(true);
     const success = result as UploadSuccess;
     expect(success.brain_id).toBe('brain_1');
@@ -267,14 +265,28 @@ describe('BrainApiClient.uploadFlowB', () => {
   it('returns UploadError on 401', async () => {
     const mock = vi.fn().mockResolvedValue(makeResponse(401, { ok: false, code: 'unauthorized' }));
     const client = makeClient(mock);
-    const result = await client.uploadFlowB({
-      path: 'Notes/foo.md',
-      content: '# Foo',
-      source_type: 'note',
-      request_uuid: 'uuid-2',
-    });
+    const result = await client.uploadFlowB(
+      { path: 'Notes/foo.md', content: '# Foo', source_type: 'note', content_hash: 'hash_x' },
+      'idem-key-2',
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('unauthorized');
+  });
+
+  it('sends x-idempotency-key header and content_hash in body', async () => {
+    const body = { ok: true, brain_id: 'brain_1', content_hash: 'hash_1', sync_version: 1 };
+    const mock = vi.fn().mockResolvedValue(makeResponse(201, body));
+    const client = makeAuthedClient(mock);
+    await client.uploadFlowB(
+      { path: 'Notes/foo.md', content: '# Foo', source_type: 'note', content_hash: 'hash_1' },
+      'my-idem-key',
+    );
+    const [, init] = mock.mock.calls[0] as [string, RequestInit];
+    const h = init.headers as Record<string, string>;
+    expect(h['x-idempotency-key']).toBe('my-idem-key');
+    const bodyParsed = JSON.parse(init.body as string);
+    expect(bodyParsed.content_hash).toBe('hash_1');
+    expect(bodyParsed.request_uuid).toBeUndefined();
   });
 });
 
@@ -298,6 +310,7 @@ describe('BrainApiClient.uploadFlowC', () => {
     const client = makeAuthedClient(mock);
     const result = await client.uploadFlowC({
       brain_id: 'brain_1',
+      path: 'Notes/foo.md',
       content: '# Client version',
       content_hash: 'client_hash',
       last_known_server_hash: 'old_hash',
@@ -314,6 +327,7 @@ describe('BrainApiClient.uploadFlowC', () => {
     const client = makeAuthedClient(mock);
     const result = await client.uploadFlowC({
       brain_id: 'brain_1',
+      path: 'Notes/foo.md',
       content: '# Updated',
       content_hash: 'new_hash',
       last_known_server_hash: 'old_hash',
@@ -328,12 +342,30 @@ describe('BrainApiClient.uploadFlowC', () => {
     const client = makeAuthedClient(mock);
     const result = await client.uploadFlowC({
       brain_id: 'brain_1',
+      path: 'Notes/foo.md',
       content: 'x'.repeat(300000),
       content_hash: 'h',
       last_known_server_hash: 'old',
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('too_large');
+  });
+
+  it('sends path in body alongside brain_id', async () => {
+    const body = { ok: true, brain_id: 'brain_1', content_hash: 'new_hash', sync_version: 3 };
+    const mock = vi.fn().mockResolvedValue(makeResponse(200, body));
+    const client = makeAuthedClient(mock);
+    await client.uploadFlowC({
+      brain_id: 'brain_1',
+      path: '05-BRAIN/item.md',
+      content: 'user notes',
+      content_hash: 'new_hash',
+      last_known_server_hash: 'old_hash',
+    });
+    const [, init] = mock.mock.calls[0] as [string, RequestInit];
+    const bodyParsed = JSON.parse(init.body as string);
+    expect(bodyParsed.path).toBe('05-BRAIN/item.md');
+    expect(bodyParsed.brain_id).toBe('brain_1');
   });
 });
 

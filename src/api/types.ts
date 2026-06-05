@@ -22,12 +22,12 @@ export type ClaimError = {
 };
 
 export type ChangeRow = {
-  id: string;
+  brain_id: string;
+  op: 'upsert' | 'delete';
   path: string | null;
   content: string;
   content_hash: string;
   sync_version: number;
-  deleted_at: string | null;
   updated_at: string;
 };
 
@@ -37,7 +37,7 @@ export type ChangesResponse = {
 };
 
 export type FileResponse = {
-  id: string;
+  brain_id: string;
   path: string;
   content: string;
   content_hash: string;
@@ -48,11 +48,12 @@ export type UploadFlowB = {
   path: string;
   content: string;
   source_type: 'note';
-  request_uuid: string;
+  content_hash: string;
 };
 
 export type UploadFlowC = {
   brain_id: string;
+  path: string;
   content: string;
   content_hash: string;
   last_known_server_hash: string;
