@@ -2,6 +2,8 @@ import { App, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { BrainApiClient } from './src/api/client';
 import { ConnectModal } from './src/connect/ConnectModal';
 import { HeartbeatScheduler } from './src/lifecycle/HeartbeatScheduler';
+import { ChangesSyncer } from './src/sync/ChangesSyncer';
+import { ObsidianVaultWriter } from './src/sync/VaultWriter';
 
 type StudioOsBrainSettings = {
   apiBaseUrl: string;
@@ -9,6 +11,8 @@ type StudioOsBrainSettings = {
   vaultId: string | null;
   vaultName: string | null;
   deviceLabel: string;
+  lastChangesSince: string | null;
+  lastChangesEtag: string | null;
 };
 
 const DEFAULT_SETTINGS: StudioOsBrainSettings = {
@@ -17,12 +21,15 @@ const DEFAULT_SETTINGS: StudioOsBrainSettings = {
   vaultId: null,
   vaultName: null,
   deviceLabel: 'Unknown device',
+  lastChangesSince: null,
+  lastChangesEtag: null,
 };
 
 export default class StudioOsBrainPlugin extends Plugin {
   settings!: StudioOsBrainSettings;
   api!: BrainApiClient;
   private heartbeat: HeartbeatScheduler | null = null;
+  private changesSyncer: ChangesSyncer | null = null;
 
   async onload() {
     await this.loadSettings();
@@ -33,9 +40,10 @@ export default class StudioOsBrainPlugin extends Plugin {
       vaultId: this.settings.vaultId,
     });
 
-    // If already connected, start heartbeat immediately
+    // If already connected, start heartbeat + changes syncer immediately
     if (this.settings.token) {
       this.startHeartbeat();
+      this.startChangesSyncer();
     }
 
     this.addSettingTab(new StudioOsBrainSettingTab(this.app, this));
@@ -64,6 +72,7 @@ export default class StudioOsBrainPlugin extends Plugin {
 
   onunload() {
     this.heartbeat?.stop();
+    this.changesSyncer?.stop();
     console.log('[StudioOS Brain] unloaded');
   }
 
@@ -95,6 +104,42 @@ export default class StudioOsBrainPlugin extends Plugin {
   stopHeartbeat() {
     this.heartbeat?.stop();
     this.heartbeat = null;
+  }
+
+  startChangesSyncer() {
+    if (this.changesSyncer) return; // idempotent
+    this.changesSyncer = new ChangesSyncer({
+      api: this.api,
+      writer: new ObsidianVaultWriter(this.app),
+      loadCursor: () => ({
+        since: this.settings.lastChangesSince,
+        etag: this.settings.lastChangesEtag,
+      }),
+      saveCursor: async (since, etag) => {
+        this.settings.lastChangesSince = since;
+        this.settings.lastChangesEtag = etag;
+        await this.saveSettings();
+      },
+      onUnauthorized: async () => {
+        this.settings.token = null;
+        this.settings.vaultId = null;
+        this.settings.vaultName = null;
+        await this.saveSettings();
+        this.api.setAuth('', '');
+        this.stopHeartbeat();
+        this.changesSyncer = null;
+        new Notice('StudioOS Brain: connection expired. Please reconnect in Settings.');
+      },
+      onError: (err) => {
+        console.error('[StudioOS Brain] sync error:', err);
+      },
+    });
+    this.changesSyncer.start();
+  }
+
+  stopChangesSyncer() {
+    this.changesSyncer?.stop();
+    this.changesSyncer = null;
   }
 }
 
@@ -131,9 +176,12 @@ class StudioOsBrainSettingTab extends PluginSettingTab {
             .setButtonText('Disconnect')
             .onClick(async () => {
               this.plugin.stopHeartbeat();
+              this.plugin.stopChangesSyncer();
               this.plugin.settings.token = null;
               this.plugin.settings.vaultId = null;
               this.plugin.settings.vaultName = null;
+              this.plugin.settings.lastChangesSince = null;
+              this.plugin.settings.lastChangesEtag = null;
               await this.plugin.saveSettings();
               new Notice('StudioOS Brain disconnected.');
               this.display(); // re-render the tab
@@ -156,6 +204,7 @@ class StudioOsBrainSettingTab extends PluginSettingTab {
                   await this.plugin.saveSettings();
                   this.plugin.api.setAuth(token, vaultId);
                   this.plugin.startHeartbeat();
+                  this.plugin.startChangesSyncer();
                   this.display(); // re-render the tab
                 },
               }).open();
