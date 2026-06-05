@@ -97,6 +97,9 @@ export class Notice {
   constructor(public message: string) {}
 }
 
+/** No-op path normalizer. Production Obsidian replaces this with platform-aware logic. */
+export const normalizePath = (s: string): string => s;
+
 // Minimal App stub
 export class App {
   vault = { getName: () => 'TestVault' };
