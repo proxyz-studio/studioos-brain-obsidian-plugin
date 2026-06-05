@@ -1,5 +1,6 @@
 import { App, Notice, normalizePath } from 'obsidian';
 import { BrainApiClient } from '../api/client';
+import { SyncIndex } from './SyncIndex';
 import { VaultWriter } from './VaultWriter';
 import { buildConflictFile } from './conflictFile';
 import { buildUploadPayload } from './uploadPayload';
@@ -12,12 +13,14 @@ export type FileWatcherOpts = {
   api: BrainApiClient;
   writer: VaultWriter;
 
+  /** Persistent bidirectional path↔brainId↔hash index. */
+  syncIndex: SyncIndex;
+
+  /** Persist the index after mutations (e.g. on successful upload or delete). */
+  persistIndex: () => Promise<void>;
+
   /** Generate a request UUID for Flow B idempotency. */
   newRequestId: () => string;
-
-  /** Read the last known server hash for a given brain_id (or null if unknown).
-   *  Caller maintains this map from /changes responses. */
-  getLastKnownServerHash: (brainId: string) => string | null;
 
   /** Optional surface for user-facing errors. */
   onError?: (msg: string, err: unknown) => void;
@@ -104,9 +107,30 @@ export class FileWatcher {
 
   private queueDeleteIfInBrainFolder(file: unknown): void {
     if (!isTFile(file)) return;
-    if (!file.path.startsWith(`${BRAIN_FOLDER}/`)) return;
-    // Proper delete handling needs a path→brainId index — deferred to PR-5 polish.
-    this.opts.onError?.('File deletion sync deferred to PR-5 polish.', new Error('not_implemented_yet'));
+    void this.handleDelete(file.path);
+  }
+
+  /** Exposed for direct testing without vault event plumbing. */
+  async handleDelete(path: string): Promise<void> {
+    const normalized = normalizePath(path);
+    if (!normalized.startsWith(`${BRAIN_FOLDER}/`)) return;
+    if (normalized.includes(' (conflict ')) return; // conflict files are never tracked
+    const entry = this.opts.syncIndex.getByPath(normalized);
+    if (!entry) {
+      // File was never synced server-side — nothing to delete
+      return;
+    }
+    try {
+      const r = await this.opts.api.deleteItem(entry.brainId);
+      if (r.ok) {
+        this.opts.syncIndex.deleteByPath(normalized);
+        await this.opts.persistIndex();
+      } else {
+        this.opts.onError?.(`Delete sync failed: ${r.code}`, new Error(r.code));
+      }
+    } catch (err) {
+      this.opts.onError?.('Delete sync threw', err);
+    }
   }
 
   /** Exposed for test assertions — tests can call this directly to skip the debounce. */
@@ -120,10 +144,10 @@ export class FileWatcher {
 
       const content = await this.opts.writer.read(path);
 
-      // Extract brain_id via regex to look up last_known_server_hash
+      // Extract brain_id via regex to look up last_known_server_hash from the persistent index
       const brainIdMatch = content.match(/^\s*---\s*\n[\s\S]*?\bbrain_id:\s*(\S+)/m);
       const brainId = brainIdMatch?.[1] ?? null;
-      const lastKnownServerHash = brainId ? this.opts.getLastKnownServerHash(brainId) : null;
+      const lastKnownServerHash = brainId ? this.opts.syncIndex.getHash(brainId) : null;
 
       const decision = await buildUploadPayload({
         path,
@@ -139,7 +163,13 @@ export class FileWatcher {
 
       if (decision.kind === 'flowB') {
         const r = await this.opts.api.uploadFlowB(decision.payload, decision.idempotencyKey);
-        if (!r.ok) this.opts.onError?.(`Upload failed: ${r.code}`, new Error(r.code));
+        if (r.ok) {
+          // Update the index with the server-assigned brain_id + returned hash
+          this.opts.syncIndex.set({ brainId: r.brain_id, path, contentHash: r.content_hash });
+          await this.opts.persistIndex();
+        } else {
+          this.opts.onError?.(`Upload failed: ${r.code}`, new Error(r.code));
+        }
         return;
       }
 
@@ -157,7 +187,11 @@ export class FileWatcher {
         new Notice(`StudioOS Brain: saved 2 versions of "${path.split('/').pop()}" — see (conflict) copy.`);
         return;
       }
-      if (!r.ok) {
+      if (r.ok) {
+        // Update hash in the index (brain_id is known for Flow C, hash may have changed)
+        this.opts.syncIndex.set({ brainId: r.brain_id, path, contentHash: r.content_hash });
+        await this.opts.persistIndex();
+      } else {
         this.opts.onError?.(`Upload failed: ${r.code}`, new Error(r.code));
       }
     } catch (err) {
