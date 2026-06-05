@@ -72,16 +72,18 @@ function openModal(deps: ConnectModalDeps) {
 // Tests
 // ---------------------------------------------------------------------------
 
+type OnSuccess = ConnectModalDeps['onSuccess'];
+
 describe('ConnectModal', () => {
   let api: ReturnType<typeof makeApi>;
   let app: ReturnType<typeof makeApp>;
-  let onSuccess: ReturnType<typeof vi.fn>;
+  let onSuccess: ReturnType<typeof vi.fn> & OnSuccess;
 
   beforeEach(() => {
     vi.clearAllMocks();
     api = makeApi({ ok: true, token: 'tok_abc', vault_id: 'vault-123' });
     app = makeApp('MyVault');
-    onSuccess = vi.fn().mockResolvedValue(undefined);
+    onSuccess = vi.fn().mockResolvedValue(undefined) as ReturnType<typeof vi.fn> & OnSuccess;
   });
 
   // 1. Empty code shows warning — does not call api.claim
