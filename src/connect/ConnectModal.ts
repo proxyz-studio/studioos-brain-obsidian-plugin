@@ -70,25 +70,31 @@ export class ConnectModal extends Modal {
     this.setStatus('Connecting…', 'info');
     this.submitBtn.setDisabled(true);
 
-    const vaultId = this.deps.existingVaultId ?? generateVaultId();
-    const vaultName = getVaultName(this.deps.app);
+    try {
+      const vaultId = this.deps.existingVaultId ?? generateVaultId();
+      const vaultName = getVaultName(this.deps.app);
 
-    const r = await this.deps.api.claim({
-      code: raw,
-      vault_id: vaultId,
-      vault_name: vaultName,
-      device_label: this.deps.deviceLabel,
-    });
+      const r = await this.deps.api.claim({
+        code: raw,
+        vault_id: vaultId,
+        vault_name: vaultName,
+        device_label: this.deps.deviceLabel,
+      });
 
-    if (r.ok) {
-      await this.deps.onSuccess({ token: r.token, vaultId: r.vault_id, vaultName });
-      new Notice('Connected to StudioOS Brain.');
-      this.close();
-      return;
+      if (r.ok) {
+        await this.deps.onSuccess({ token: r.token, vaultId: r.vault_id, vaultName });
+        new Notice('Connected to StudioOS Brain.');
+        this.close();
+        return;
+      }
+
+      this.submitBtn.setDisabled(false);
+      this.setStatus(this.errorMessageFor(r.code), 'error');
+    } catch (err) {
+      this.submitBtn.setDisabled(false);
+      this.setStatus('Connection failed — check your internet and the server URL in settings, then try again.', 'error');
+      console.error('[StudioOS Brain] connect failed:', err);
     }
-
-    this.submitBtn.setDisabled(false);
-    this.setStatus(this.errorMessageFor(r.code), 'error');
   }
 
   private setStatus(msg: string, level: 'info' | 'warn' | 'error') {

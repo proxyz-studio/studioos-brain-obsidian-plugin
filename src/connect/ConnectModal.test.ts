@@ -266,6 +266,30 @@ describe('ConnectModal', () => {
 
     expect(onSuccess).not.toHaveBeenCalled();
   });
+
+  // 10. Thrown error (e.g. CORS / network failure) surfaces an error message
+  //     and re-enables the submit button instead of hanging on "Connecting…"
+  it('shows connection-failed message and re-enables button when api.claim throws', async () => {
+    const throwingApi = {
+      claim: vi.fn().mockRejectedValue(new Error('CORS blocked')),
+      heartbeat: vi.fn(),
+      setAuth: vi.fn(),
+    };
+    const { setCode, clickSubmit, statusText, submitDisabled } = openModal({
+      app: app as never,
+      api: throwingApi as never,
+      deviceLabel: 'MacBook',
+      existingVaultId: null,
+      onSuccess,
+    });
+
+    setCode('1234-5678');
+    await clickSubmit();
+
+    expect(statusText()).toContain('Connection failed');
+    expect(submitDisabled()).toBe(false);
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
 });
 
 // Suppress unused import warning — Notice is imported to verify the stub loads
