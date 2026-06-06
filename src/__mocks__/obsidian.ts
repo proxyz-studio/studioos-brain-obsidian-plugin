@@ -100,6 +100,15 @@ export class Notice {
 /** No-op path normalizer. Production Obsidian replaces this with platform-aware logic. */
 export const normalizePath = (s: string): string => s;
 
+/**
+ * requestUrl stub — fails loudly if a test accidentally hits it without injecting _request.
+ * Tests that exercise BrainApiClient should always inject _request; this stub exists only
+ * so the import resolves in the test environment.
+ */
+export async function requestUrl(_params: unknown): Promise<never> {
+  throw new Error('requestUrl not mocked — inject _request in BrainApiClient constructor for tests');
+}
+
 /** Minimal TFile stub — only the `path` property is required by FileWatcher. */
 export class TFile {
   constructor(public path: string) {}

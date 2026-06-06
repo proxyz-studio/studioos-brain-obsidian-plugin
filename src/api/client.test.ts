@@ -1,36 +1,32 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BrainApiClient } from './client';
+import type { NormalizedResponse } from './client';
 import type { ChangeRow, ChangesResponse, ClaimError, ClaimSuccess, FileResponse, UploadConflict, UploadSuccess } from './types';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Build a minimal Response-like object that vitest's fetch mock returns. */
-function makeResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
-  const bodyStr = JSON.stringify(body);
+/** Build a NormalizedResponse (the shape _request must return). */
+function makeNorm(status: number, body: unknown, headers: Record<string, string> = {}): NormalizedResponse {
   return {
-    ok: status >= 200 && status < 300,
     status,
-    headers: {
-      get: (key: string) => headers[key.toLowerCase()] ?? null,
-    },
-    json: () => Promise.resolve(body),
-    text: () => Promise.resolve(bodyStr),
-  } as unknown as Response;
+    headers,
+    text: body === '' ? '' : JSON.stringify(body),
+  };
 }
 
-function makeClient(fetchMock: ReturnType<typeof vi.fn>, opts?: { token?: string; vaultId?: string }) {
+function makeClient(requestMock: ReturnType<typeof vi.fn>, opts?: { token?: string; vaultId?: string }) {
   return new BrainApiClient({
     baseUrl: 'https://studioos.proxyz.studio',
     token: opts?.token ?? null,
     vaultId: opts?.vaultId ?? null,
-    _fetch: fetchMock as unknown as typeof fetch,
+    _request: requestMock as never,
   });
 }
 
-function makeAuthedClient(fetchMock: ReturnType<typeof vi.fn>) {
-  return makeClient(fetchMock, { token: 'tok_abc123', vaultId: 'vault_xyz' });
+function makeAuthedClient(requestMock: ReturnType<typeof vi.fn>) {
+  return makeClient(requestMock, { token: 'tok_abc123', vaultId: 'vault_xyz' });
 }
 
 // ---------------------------------------------------------------------------
@@ -40,7 +36,7 @@ function makeAuthedClient(fetchMock: ReturnType<typeof vi.fn>) {
 describe('BrainApiClient.claim', () => {
   it('returns ClaimSuccess on 200 with token', async () => {
     const mock = vi.fn().mockResolvedValue(
-      makeResponse(200, {
+      makeNorm(200, {
         token: 'tok_abc',
         vault_id: 'vault_1',
         server_challenge: 'chall_abc',
@@ -62,7 +58,7 @@ describe('BrainApiClient.claim', () => {
 
   it('returns ClaimError on 401 expired', async () => {
     const mock = vi.fn().mockResolvedValue(
-      makeResponse(401, { ok: false, code: 'expired' }),
+      makeNorm(401, { ok: false, code: 'expired' }),
     );
     const client = makeClient(mock);
     const result = await client.claim({
@@ -78,7 +74,7 @@ describe('BrainApiClient.claim', () => {
 
   it('returns ClaimError with http_500 code on unexpected 500', async () => {
     const mock = vi.fn().mockResolvedValue(
-      makeResponse(500, { message: 'Internal Server Error' }),
+      makeNorm(500, { message: 'Internal Server Error' }),
     );
     const client = makeClient(mock);
     const result = await client.claim({
@@ -94,13 +90,13 @@ describe('BrainApiClient.claim', () => {
 
   it('posts to correct URL without auth headers', async () => {
     const mock = vi.fn().mockResolvedValue(
-      makeResponse(200, { token: 't', vault_id: 'v', server_challenge: 'c' }),
+      makeNorm(200, { token: 't', vault_id: 'v', server_challenge: 'c' }),
     );
     const client = makeClient(mock);
     await client.claim({ code: '1234-5678', vault_id: 'v', vault_name: 'n', device_label: 'd' });
-    const [url, init] = mock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://studioos.proxyz.studio/api/brain/sync/auth/claim');
-    expect((init.headers as Record<string, string>)['Authorization']).toBeUndefined();
+    const callArg = mock.mock.calls[0][0] as { url: string; headers?: Record<string, string> };
+    expect(callArg.url).toBe('https://studioos.proxyz.studio/api/brain/sync/auth/claim');
+    expect(callArg.headers?.['Authorization']).toBeUndefined();
   });
 });
 
@@ -110,7 +106,7 @@ describe('BrainApiClient.claim', () => {
 
 describe('BrainApiClient.heartbeat', () => {
   it('returns ok:true status:200 on success', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, { ok: true }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, { ok: true }));
     const client = makeAuthedClient(mock);
     const result = await client.heartbeat();
     expect(result.ok).toBe(true);
@@ -118,7 +114,7 @@ describe('BrainApiClient.heartbeat', () => {
   });
 
   it('returns ok:false status:401 on unauthorized', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(401, { ok: false, code: 'unauthorized' }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(401, { ok: false, code: 'unauthorized' }));
     const client = makeClient(mock); // no auth
     const result = await client.heartbeat();
     expect(result.ok).toBe(false);
@@ -126,13 +122,12 @@ describe('BrainApiClient.heartbeat', () => {
   });
 
   it('sends Authorization + X-Vault-Id headers when authed', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, { ok: true }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, { ok: true }));
     const client = makeAuthedClient(mock);
     await client.heartbeat();
-    const [, init] = mock.mock.calls[0] as [string, RequestInit];
-    const h = init.headers as Record<string, string>;
-    expect(h['Authorization']).toBe('Bearer tok_abc123');
-    expect(h['X-Vault-Id']).toBe('vault_xyz');
+    const callArg = mock.mock.calls[0][0] as { headers: Record<string, string> };
+    expect(callArg.headers['Authorization']).toBe('Bearer tok_abc123');
+    expect(callArg.headers['X-Vault-Id']).toBe('vault_xyz');
   });
 });
 
@@ -153,7 +148,7 @@ describe('BrainApiClient.getChanges', () => {
 
   it('returns ChangesResponse on 200', async () => {
     const body: ChangesResponse = { changes: [sampleChange], etag: '"etag_1"' };
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, body));
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, body));
     const client = makeAuthedClient(mock);
     const result = await client.getChanges();
     expect(result.notModified).toBe(false);
@@ -163,7 +158,7 @@ describe('BrainApiClient.getChanges', () => {
   });
 
   it('returns notModified:true on 304', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(304, ''));
+    const mock = vi.fn().mockResolvedValue(makeNorm(304, ''));
     const client = makeAuthedClient(mock);
     const result = await client.getChanges({ etag: '"etag_1"' });
     expect(result.notModified).toBe(true);
@@ -172,26 +167,25 @@ describe('BrainApiClient.getChanges', () => {
   });
 
   it('sends If-None-Match header when etag passed', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(304, ''));
+    const mock = vi.fn().mockResolvedValue(makeNorm(304, ''));
     const client = makeAuthedClient(mock);
     await client.getChanges({ etag: '"etag_abc"' });
-    const [, init] = mock.mock.calls[0] as [string, RequestInit];
-    const h = init.headers as Record<string, string>;
-    expect(h['If-None-Match']).toBe('"etag_abc"');
+    const callArg = mock.mock.calls[0][0] as { headers: Record<string, string> };
+    expect(callArg.headers['If-None-Match']).toBe('"etag_abc"');
   });
 
   it('includes since param in URL when Date passed', async () => {
     const body: ChangesResponse = { changes: [], etag: '"e"' };
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, body));
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, body));
     const client = makeAuthedClient(mock);
     const since = new Date('2026-06-01T00:00:00Z');
     await client.getChanges({ since });
-    const [url] = mock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain('since=2026-06-01T00%3A00%3A00.000Z');
+    const callArg = mock.mock.calls[0][0] as { url: string };
+    expect(callArg.url).toContain('since=2026-06-01T00%3A00%3A00.000Z');
   });
 
   it('returns data:null on 401 (not notModified)', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(401, { ok: false }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(401, { ok: false }));
     const client = makeClient(mock);
     const result = await client.getChanges();
     expect(result.data).toBeNull();
@@ -213,7 +207,7 @@ describe('BrainApiClient.getFile', () => {
       content_hash: 'abc',
       sync_version: 1,
     };
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, body));
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, body));
     const client = makeAuthedClient(mock);
     const result = await client.getFile('brain_1');
     expect(result).not.toBeNull();
@@ -222,14 +216,14 @@ describe('BrainApiClient.getFile', () => {
   });
 
   it('returns null on 404', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(404, { ok: false, code: 'not_found' }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(404, { ok: false, code: 'not_found' }));
     const client = makeAuthedClient(mock);
     const result = await client.getFile('brain_missing');
     expect(result).toBeNull();
   });
 
   it('URL-encodes the brainId', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, {
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, {
       brain_id: 'brain/special',
       path: 'p',
       content: 'c',
@@ -238,8 +232,8 @@ describe('BrainApiClient.getFile', () => {
     }));
     const client = makeAuthedClient(mock);
     await client.getFile('brain/special');
-    const [url] = mock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain('brain%2Fspecial');
+    const callArg = mock.mock.calls[0][0] as { url: string };
+    expect(callArg.url).toContain('brain%2Fspecial');
   });
 });
 
@@ -250,7 +244,7 @@ describe('BrainApiClient.getFile', () => {
 describe('BrainApiClient.uploadFlowB', () => {
   it('returns UploadSuccess on 201', async () => {
     const body = { ok: true, brain_id: 'brain_1', content_hash: 'hash_1', sync_version: 1 };
-    const mock = vi.fn().mockResolvedValue(makeResponse(201, body));
+    const mock = vi.fn().mockResolvedValue(makeNorm(201, body));
     const client = makeAuthedClient(mock);
     const result = await client.uploadFlowB(
       { path: 'Notes/foo.md', content: '# Foo', source_type: 'note', content_hash: 'hash_1' },
@@ -263,7 +257,7 @@ describe('BrainApiClient.uploadFlowB', () => {
   });
 
   it('returns UploadError on 401', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(401, { ok: false, code: 'unauthorized' }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(401, { ok: false, code: 'unauthorized' }));
     const client = makeClient(mock);
     const result = await client.uploadFlowB(
       { path: 'Notes/foo.md', content: '# Foo', source_type: 'note', content_hash: 'hash_x' },
@@ -275,16 +269,15 @@ describe('BrainApiClient.uploadFlowB', () => {
 
   it('sends x-idempotency-key header and content_hash in body', async () => {
     const body = { ok: true, brain_id: 'brain_1', content_hash: 'hash_1', sync_version: 1 };
-    const mock = vi.fn().mockResolvedValue(makeResponse(201, body));
+    const mock = vi.fn().mockResolvedValue(makeNorm(201, body));
     const client = makeAuthedClient(mock);
     await client.uploadFlowB(
       { path: 'Notes/foo.md', content: '# Foo', source_type: 'note', content_hash: 'hash_1' },
       'my-idem-key',
     );
-    const [, init] = mock.mock.calls[0] as [string, RequestInit];
-    const h = init.headers as Record<string, string>;
-    expect(h['x-idempotency-key']).toBe('my-idem-key');
-    const bodyParsed = JSON.parse(init.body as string);
+    const callArg = mock.mock.calls[0][0] as { headers: Record<string, string>; body: string };
+    expect(callArg.headers['x-idempotency-key']).toBe('my-idem-key');
+    const bodyParsed = JSON.parse(callArg.body);
     expect(bodyParsed.content_hash).toBe('hash_1');
     expect(bodyParsed.request_uuid).toBeUndefined();
   });
@@ -306,7 +299,7 @@ describe('BrainApiClient.uploadFlowC', () => {
         sync_version: 2,
       },
     };
-    const mock = vi.fn().mockResolvedValue(makeResponse(409, body));
+    const mock = vi.fn().mockResolvedValue(makeNorm(409, body));
     const client = makeAuthedClient(mock);
     const result = await client.uploadFlowC({
       brain_id: 'brain_1',
@@ -323,7 +316,7 @@ describe('BrainApiClient.uploadFlowC', () => {
 
   it('returns UploadSuccess on 200 applied', async () => {
     const body = { ok: true, brain_id: 'brain_1', content_hash: 'new_hash', sync_version: 3 };
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, body));
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, body));
     const client = makeAuthedClient(mock);
     const result = await client.uploadFlowC({
       brain_id: 'brain_1',
@@ -338,7 +331,7 @@ describe('BrainApiClient.uploadFlowC', () => {
   });
 
   it('returns UploadError on 413 too_large', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(413, { ok: false, code: 'too_large' }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(413, { ok: false, code: 'too_large' }));
     const client = makeAuthedClient(mock);
     const result = await client.uploadFlowC({
       brain_id: 'brain_1',
@@ -353,7 +346,7 @@ describe('BrainApiClient.uploadFlowC', () => {
 
   it('sends path in body alongside brain_id', async () => {
     const body = { ok: true, brain_id: 'brain_1', content_hash: 'new_hash', sync_version: 3 };
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, body));
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, body));
     const client = makeAuthedClient(mock);
     await client.uploadFlowC({
       brain_id: 'brain_1',
@@ -362,8 +355,8 @@ describe('BrainApiClient.uploadFlowC', () => {
       content_hash: 'new_hash',
       last_known_server_hash: 'old_hash',
     });
-    const [, init] = mock.mock.calls[0] as [string, RequestInit];
-    const bodyParsed = JSON.parse(init.body as string);
+    const callArg = mock.mock.calls[0][0] as { body: string };
+    const bodyParsed = JSON.parse(callArg.body);
     expect(bodyParsed.path).toBe('05-BRAIN/item.md');
     expect(bodyParsed.brain_id).toBe('brain_1');
   });
@@ -375,14 +368,14 @@ describe('BrainApiClient.uploadFlowC', () => {
 
 describe('BrainApiClient.deleteItem', () => {
   it('returns ok:true on 200', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, { ok: true }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, { ok: true }));
     const client = makeAuthedClient(mock);
     const result = await client.deleteItem('brain_1');
     expect(result.ok).toBe(true);
   });
 
   it('returns ok:false with code on error', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(401, { ok: false, code: 'unauthorized' }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(401, { ok: false, code: 'unauthorized' }));
     const client = makeClient(mock);
     const result = await client.deleteItem('brain_1');
     expect(result.ok).toBe(false);
@@ -390,11 +383,11 @@ describe('BrainApiClient.deleteItem', () => {
   });
 
   it('sends correct body with brain_id', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, { ok: true }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, { ok: true }));
     const client = makeAuthedClient(mock);
     await client.deleteItem('brain_abc');
-    const [, init] = mock.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(init.body as string)).toEqual({ brain_id: 'brain_abc' });
+    const callArg = mock.mock.calls[0][0] as { body: string };
+    expect(JSON.parse(callArg.body)).toEqual({ brain_id: 'brain_abc' });
   });
 });
 
@@ -404,14 +397,13 @@ describe('BrainApiClient.deleteItem', () => {
 
 describe('BrainApiClient.setAuth', () => {
   it('updates auth and subsequent calls use the new token', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(200, { ok: true }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(200, { ok: true }));
     const client = makeClient(mock); // starts with no auth
     client.setAuth('new_token', 'new_vault');
     await client.heartbeat();
-    const [, init] = mock.mock.calls[0] as [string, RequestInit];
-    const h = init.headers as Record<string, string>;
-    expect(h['Authorization']).toBe('Bearer new_token');
-    expect(h['X-Vault-Id']).toBe('new_vault');
+    const callArg = mock.mock.calls[0][0] as { headers: Record<string, string> };
+    expect(callArg.headers['Authorization']).toBe('Bearer new_token');
+    expect(callArg.headers['X-Vault-Id']).toBe('new_vault');
   });
 });
 
@@ -421,12 +413,11 @@ describe('BrainApiClient.setAuth', () => {
 
 describe('BrainApiClient with no auth', () => {
   it('sends no Authorization or X-Vault-Id headers', async () => {
-    const mock = vi.fn().mockResolvedValue(makeResponse(401, { ok: false }));
+    const mock = vi.fn().mockResolvedValue(makeNorm(401, { ok: false }));
     const client = makeClient(mock); // no token, no vaultId
     await client.heartbeat();
-    const [, init] = mock.mock.calls[0] as [string, RequestInit];
-    const h = init.headers as Record<string, string>;
-    expect(h['Authorization']).toBeUndefined();
-    expect(h['X-Vault-Id']).toBeUndefined();
+    const callArg = mock.mock.calls[0][0] as { headers?: Record<string, string> };
+    expect(callArg.headers?.['Authorization']).toBeUndefined();
+    expect(callArg.headers?.['X-Vault-Id']).toBeUndefined();
   });
 });

@@ -1,3 +1,4 @@
+import { requestUrl } from 'obsidian';
 import type {
   ChangesResponse,
   ClaimError,
@@ -12,27 +13,95 @@ import type {
   UploadSuccess,
 } from './types';
 
+// ---------------------------------------------------------------------------
+// Normalized request seam — decouples the HTTP transport from business logic.
+// Production code uses defaultRequest (wraps Obsidian's requestUrl, CORS-free).
+// Tests inject _request with a vi.fn() returning NormalizedResponse.
+// ---------------------------------------------------------------------------
+
+export type NormalizedResponse = {
+  status: number;
+  headers: Record<string, string>;
+  /** Raw response body as a string. Parse with safeJsonParse(). */
+  text: string;
+};
+
+export type RequestFn = (params: {
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  body?: string;
+}) => Promise<NormalizedResponse>;
+
+/**
+ * Default transport: Obsidian's requestUrl bypasses CORS in the Electron
+ * renderer (unlike fetch, which is blocked by CORS for cross-origin requests
+ * from `app://obsidian.md`).
+ *
+ * Key differences from fetch:
+ * - response.json and response.text are synchronous values, not methods.
+ * - throw: false prevents requestUrl from throwing on 4xx/5xx; we handle
+ *   status ourselves.
+ * - headers in RequestUrlResponse is already Record<string, string>.
+ */
+async function defaultRequest(params: {
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  body?: string;
+}): Promise<NormalizedResponse> {
+  const res = await requestUrl({
+    url: params.url,
+    method: params.method,
+    headers: params.headers,
+    body: params.body,
+    throw: false, // never throw on 4xx/5xx — we read res.status ourselves
+  });
+  return {
+    status: res.status,
+    headers: res.headers ?? {},
+    text: res.text ?? '',
+  };
+}
+
+/** Safe JSON parse: returns {} on empty or invalid input, never throws. */
+function safeJsonParse(text: string): Record<string, unknown> {
+  try {
+    return text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Client config
+// ---------------------------------------------------------------------------
+
 export type ApiClientConfig = {
   baseUrl: string;
   token?: string | null;
   /** X-Vault-Id header. Required for all bearer-authed calls (per PR-1 auth model). */
   vaultId?: string | null;
-  /** Test-only fetch override. Default: globalThis.fetch */
-  _fetch?: typeof fetch;
+  /** Test-only request override. Default: defaultRequest (wraps Obsidian requestUrl). */
+  _request?: RequestFn;
 };
+
+// ---------------------------------------------------------------------------
+// BrainApiClient
+// ---------------------------------------------------------------------------
 
 export class BrainApiClient {
   private baseUrl: string;
   private token: string | null;
   private vaultId: string | null;
-  private fetcher: typeof fetch;
+  private requestFn: RequestFn;
 
   constructor(config: ApiClientConfig) {
     // Normalize: strip trailing slash so all URL concat is clean
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
     this.token = config.token ?? null;
     this.vaultId = config.vaultId ?? null;
-    this.fetcher = config._fetch ?? fetch;
+    this.requestFn = config._request ?? defaultRequest;
   }
 
   /** Mutate auth on existing instance (after a fresh claim). */
@@ -43,24 +112,26 @@ export class BrainApiClient {
 
   /** Claim a pairing code — no auth required (this IS the auth). */
   async claim(req: ClaimRequest): Promise<ClaimSuccess | ClaimError> {
-    const r = await this.fetcher(`${this.baseUrl}/api/brain/sync/auth/claim`, {
+    const res = await this.requestFn({
+      url: `${this.baseUrl}/api/brain/sync/auth/claim`,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
     });
-    const j = await r.json().catch(() => ({}));
-    if (r.ok && j.token) {
-      return { ok: true, ...j };
+    const j = safeJsonParse(res.text);
+    if (res.status >= 200 && res.status < 300 && j.token) {
+      return { ok: true, ...j } as ClaimSuccess;
     }
-    return { ok: false, code: j.code ?? `http_${r.status}` };
+    return { ok: false, code: (j.code as string | undefined) ?? `http_${res.status}` };
   }
 
   async heartbeat(): Promise<{ ok: boolean; status: number }> {
-    const r = await this.fetcher(`${this.baseUrl}/api/brain/sync/heartbeat`, {
+    const res = await this.requestFn({
+      url: `${this.baseUrl}/api/brain/sync/heartbeat`,
       method: 'POST',
       headers: this.authHeaders(),
     });
-    return { ok: r.ok, status: r.status };
+    return { ok: res.status >= 200 && res.status < 300, status: res.status };
   }
 
   /** GET /changes with optional `since` cursor + If-None-Match for ETag. Returns null on 304. */
@@ -70,28 +141,32 @@ export class BrainApiClient {
     const url = `${this.baseUrl}/api/brain/sync/changes${params.toString() ? `?${params}` : ''}`;
     const headers: Record<string, string> = { ...this.authHeaders() };
     if (opts.etag) headers['If-None-Match'] = opts.etag;
-    const r = await this.fetcher(url, { method: 'GET', headers });
-    if (r.status === 304) {
+
+    const res = await this.requestFn({ url, method: 'GET', headers });
+
+    if (res.status === 304) {
       return { data: null, notModified: true, status: 304 };
     }
-    if (!r.ok) {
-      return { data: null, notModified: false, status: r.status };
+    if (res.status < 200 || res.status >= 300) {
+      return { data: null, notModified: false, status: res.status };
     }
-    const j = (await r.json()) as ChangesResponse;
-    return { data: j, notModified: false, status: r.status };
+    const j = safeJsonParse(res.text) as unknown as ChangesResponse;
+    return { data: j, notModified: false, status: res.status };
   }
 
   async getFile(brainId: string): Promise<FileResponse | null> {
-    const r = await this.fetcher(`${this.baseUrl}/api/brain/sync/file/${encodeURIComponent(brainId)}`, {
+    const res = await this.requestFn({
+      url: `${this.baseUrl}/api/brain/sync/file/${encodeURIComponent(brainId)}`,
       method: 'GET',
       headers: this.authHeaders(),
     });
-    if (!r.ok) return null;
-    return (await r.json()) as FileResponse;
+    if (res.status < 200 || res.status >= 300) return null;
+    return safeJsonParse(res.text) as unknown as FileResponse;
   }
 
   async uploadFlowB(payload: UploadFlowB, idempotencyKey: string): Promise<UploadSuccess | UploadError> {
-    const r = await this.fetcher(`${this.baseUrl}/api/brain/sync/upload`, {
+    const res = await this.requestFn({
+      url: `${this.baseUrl}/api/brain/sync/upload`,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -100,34 +175,40 @@ export class BrainApiClient {
       },
       body: JSON.stringify(payload),
     });
-    const j = await r.json().catch(() => ({}));
-    if (r.ok && j.ok !== false) return { ok: true, ...j, status: r.status };
-    return { ok: false, code: j.code ?? `http_${r.status}` };
+    const j = safeJsonParse(res.text);
+    if (res.status >= 200 && res.status < 300 && j.ok !== false) {
+      return { ok: true, ...j, status: res.status } as UploadSuccess;
+    }
+    return { ok: false, code: (j.code as string | undefined) ?? `http_${res.status}` };
   }
 
   async uploadFlowC(payload: UploadFlowC): Promise<UploadSuccess | UploadConflict | UploadError> {
-    const r = await this.fetcher(`${this.baseUrl}/api/brain/sync/upload`, {
+    const res = await this.requestFn({
+      url: `${this.baseUrl}/api/brain/sync/upload`,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(payload),
     });
-    const j = await r.json().catch(() => ({}));
-    if (r.status === 409 && j.code === 'hash_mismatch') {
-      return j as UploadConflict;
+    const j = safeJsonParse(res.text);
+    if (res.status === 409 && j.code === 'hash_mismatch') {
+      return j as unknown as UploadConflict;
     }
-    if (r.ok && j.ok !== false) return { ok: true, ...j, status: r.status };
-    return { ok: false, code: j.code ?? `http_${r.status}` };
+    if (res.status >= 200 && res.status < 300 && j.ok !== false) {
+      return { ok: true, ...j, status: res.status } as UploadSuccess;
+    }
+    return { ok: false, code: (j.code as string | undefined) ?? `http_${res.status}` };
   }
 
   async deleteItem(brainId: string): Promise<DeleteResponse> {
-    const r = await this.fetcher(`${this.baseUrl}/api/brain/sync/delete`, {
+    const res = await this.requestFn({
+      url: `${this.baseUrl}/api/brain/sync/delete`,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify({ brain_id: brainId }),
     });
-    const j = await r.json().catch(() => ({}));
-    if (r.ok) return { ok: true };
-    return { ok: false, code: j.code ?? `http_${r.status}` };
+    if (res.status >= 200 && res.status < 300) return { ok: true };
+    const j = safeJsonParse(res.text);
+    return { ok: false, code: (j.code as string | undefined) ?? `http_${res.status}` };
   }
 
   private authHeaders(): Record<string, string> {
