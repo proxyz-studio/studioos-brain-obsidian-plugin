@@ -1,10 +1,10 @@
 {
-  "id": "studioos-brain",
-  "name": "StudioOS Brain",
-  "version": "0.2.0",
-  "minAppVersion": "1.4.0",
-  "description": "Syncs your MY 2nd BRAIN items between StudioOS and your Obsidian vault.",
-  "author": "PROXYZ Studio",
-  "authorUrl": "https://proxyz.studio",
-  "isDesktopOnly": false
+	"id": "studioos-brain",
+	"name": "StudioOS Brain",
+	"version": "0.3.0",
+	"minAppVersion": "1.4.0",
+	"description": "Syncs your MY 2nd BRAIN items between StudioOS and your Obsidian vault.",
+	"author": "PROXYZ Studio",
+	"authorUrl": "https://proxyz.studio",
+	"isDesktopOnly": false
 }

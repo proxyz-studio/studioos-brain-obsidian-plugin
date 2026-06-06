@@ -1,10 +1,12 @@
 import { BrainApiClient } from '../api/client';
 import { ChangeRow } from '../api/types';
+import { PendingWritesPuller } from './PendingWritesPuller';
 import { VaultWriter } from './VaultWriter';
 
 export type ChangesSyncerOpts = {
   api: BrainApiClient;
   writer: VaultWriter;
+  puller?: PendingWritesPuller;
 
   /** Load persistence — return the saved cursor + etag from plugin data. */
   loadCursor: () => { since: string | null; etag: string | null };
@@ -80,6 +82,13 @@ export class ChangesSyncer {
       if (!result.data) return; // non-OK non-304 — error
 
       await this.applyChanges(result.data.changes);
+
+      if (this.opts.puller) {
+        await this.opts.puller.tick({
+          pendingAttachments: result.data.pendingAttachments ?? [],
+          pendingInits: result.data.pendingInits ?? [],
+        });
+      }
 
       // Persist new cursor — use the largest updated_at in the batch as the next since.
       const newSince = newestUpdatedAt(result.data.changes, since);

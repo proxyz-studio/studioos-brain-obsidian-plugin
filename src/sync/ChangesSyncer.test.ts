@@ -24,7 +24,7 @@ function makeChangesResult(
   overrides: Partial<{ data: ChangesResponse | null; notModified: boolean; status: number }> = {},
 ) {
   return {
-    data: { changes: [makeRow()], etag: '"etag-1"' },
+    data: { changes: [makeRow()], pendingAttachments: [], pendingInits: [], etag: '"etag-1"' },
     notModified: false,
     status: 200,
     ...overrides,
@@ -131,7 +131,7 @@ describe('ChangesSyncer', () => {
     const row1 = makeRow({ brain_id: 'a', path: '05-BRAIN/a.md', content: 'content a' });
     const row2 = makeRow({ brain_id: 'b', path: '05-BRAIN/b.md', content: 'content b' });
     const opts = makeOpts(
-      makeChangesResult({ data: { changes: [row1, row2], etag: '"e"' } }),
+      makeChangesResult({ data: { changes: [row1, row2], pendingAttachments: [], pendingInits: [], etag: '"e"' } }),
     );
     const syncer = new ChangesSyncer(opts);
     await syncer.tick();
@@ -147,7 +147,7 @@ describe('ChangesSyncer', () => {
     await w.write('05-BRAIN/gone.md', 'old content');
     const deletedRow = makeRow({ path: '05-BRAIN/gone.md', op: 'delete' });
     const opts = makeOpts(
-      makeChangesResult({ data: { changes: [deletedRow], etag: '"e"' } }),
+      makeChangesResult({ data: { changes: [deletedRow], pendingAttachments: [], pendingInits: [], etag: '"e"' } }),
       { writer: w },
     );
     const syncer = new ChangesSyncer(opts);
@@ -164,7 +164,7 @@ describe('ChangesSyncer', () => {
       makeRow({ brain_id: 'id-3', path: '05-BRAIN/c.md', updated_at: '2026-05-30T00:00:00.000Z' }),
     ];
     const opts = makeOpts(
-      makeChangesResult({ data: { changes: rows, etag: '"new-etag"' } }),
+      makeChangesResult({ data: { changes: rows, pendingAttachments: [], pendingInits: [], etag: '"new-etag"' } }),
     );
     const syncer = new ChangesSyncer(opts);
     await syncer.tick();
@@ -286,7 +286,7 @@ describe('ChangesSyncer', () => {
   // 11. unstamped change (path: null) is skipped
   it('skips changes with null path (unstamped, defensive against D11)', async () => {
     const unstamped = makeRow({ path: null });
-    const opts = makeOpts(makeChangesResult({ data: { changes: [unstamped], etag: '"e"' } }));
+    const opts = makeOpts(makeChangesResult({ data: { changes: [unstamped], pendingAttachments: [], pendingInits: [], etag: '"e"' } }));
     const syncer = new ChangesSyncer(opts);
     await syncer.tick();
 

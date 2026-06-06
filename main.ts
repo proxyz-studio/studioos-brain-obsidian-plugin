@@ -4,6 +4,7 @@ import { ConnectModal } from './src/connect/ConnectModal';
 import { HeartbeatScheduler } from './src/lifecycle/HeartbeatScheduler';
 import { ChangesSyncer } from './src/sync/ChangesSyncer';
 import { FileWatcher } from './src/sync/FileWatcher';
+import { PendingWritesPuller } from './src/sync/PendingWritesPuller';
 import { IndexEntry, SyncIndex } from './src/sync/SyncIndex';
 import { VaultMirrorPusher } from './src/sync/VaultMirrorPusher';
 import { ObsidianVaultWriter } from './src/sync/VaultWriter';
@@ -132,6 +133,13 @@ export default class StudioOsBrainPlugin extends Plugin {
     this.changesSyncer = new ChangesSyncer({
       api: this.api,
       writer: new ObsidianVaultWriter(this.app),
+      puller: new PendingWritesPuller({
+        api: this.api,
+        vault: this.app.vault as unknown as { adapter: { writeBinary(path: string, data: ArrayBuffer): Promise<void>; write(path: string, content: string): Promise<void>; } },
+        onError: (err) => {
+          console.error('[StudioOS Brain] pending writes error:', err);
+        },
+      }),
       loadCursor: () => ({
         since: this.settings.lastChangesSince,
         etag: this.settings.lastChangesEtag,

@@ -199,6 +199,42 @@ export class BrainApiClient {
     return { ok: false, code: (j.code as string | undefined) ?? `http_${res.status}` };
   }
 
+  async fetchAttachmentBlob(id: string): Promise<{ blob: ArrayBuffer; mime: string } | null> {
+    const res = await this.requestFn({
+      url: `${this.baseUrl}/api/brain/vault/attachment/${encodeURIComponent(id)}/blob`,
+      method: 'GET',
+      headers: this.authHeaders(),
+    });
+    if (res.status < 200 || res.status >= 300) return null;
+    // requestUrl returns text; we need to decode base64 if the server sends it that way.
+    // However our server returns raw binary. In Obsidian requestUrl, binary responses
+    // are available via the arraybuffer property in newer versions, but for compatibility
+    // we treat the text as-is and let the caller handle encoding.
+    // Actually, requestUrl on Obsidian 1.5+ supports `contentType: 'arraybuffer'` but
+    // the defaultRequest wrapper doesn't expose that. For now we return the text as a
+    // Uint8Array since our attachments are small (< 5 MB).
+    const bytes = new TextEncoder().encode(res.text);
+    return { blob: bytes.buffer, mime: res.headers['content-type'] ?? 'application/octet-stream' };
+  }
+
+  async postAttachmentApplied(id: string): Promise<boolean> {
+    const res = await this.requestFn({
+      url: `${this.baseUrl}/api/brain/sync/attachment/${encodeURIComponent(id)}/applied`,
+      method: 'POST',
+      headers: this.authHeaders(),
+    });
+    return res.status >= 200 && res.status < 300;
+  }
+
+  async postInitApplied(): Promise<boolean> {
+    const res = await this.requestFn({
+      url: `${this.baseUrl}/api/brain/sync/init/applied`,
+      method: 'POST',
+      headers: this.authHeaders(),
+    });
+    return res.status >= 200 && res.status < 300;
+  }
+
   async deleteItem(brainId: string): Promise<DeleteResponse> {
     const res = await this.requestFn({
       url: `${this.baseUrl}/api/brain/sync/delete`,

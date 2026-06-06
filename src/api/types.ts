@@ -31,8 +31,23 @@ export type ChangeRow = {
   updated_at: string;
 };
 
+export type PendingAttachment = {
+  id: string;
+  vaultPath: string;
+  mime: string;
+  sizeBytes: number;
+  contentHash: string;
+};
+
+export type PendingInit = {
+  vaultPath: string;
+  content: string;
+};
+
 export type ChangesResponse = {
   changes: ChangeRow[];
+  pendingAttachments: PendingAttachment[];
+  pendingInits: PendingInit[];
   etag: string;
 };
 

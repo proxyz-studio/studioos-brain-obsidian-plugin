@@ -147,7 +147,7 @@ describe('BrainApiClient.getChanges', () => {
   };
 
   it('returns ChangesResponse on 200', async () => {
-    const body: ChangesResponse = { changes: [sampleChange], etag: '"etag_1"' };
+    const body: ChangesResponse = { changes: [sampleChange], pendingAttachments: [], pendingInits: [], etag: '"etag_1"' };
     const mock = vi.fn().mockResolvedValue(makeNorm(200, body));
     const client = makeAuthedClient(mock);
     const result = await client.getChanges();
@@ -175,7 +175,7 @@ describe('BrainApiClient.getChanges', () => {
   });
 
   it('includes since param in URL when Date passed', async () => {
-    const body: ChangesResponse = { changes: [], etag: '"e"' };
+    const body: ChangesResponse = { changes: [], pendingAttachments: [], pendingInits: [], etag: '"e"' };
     const mock = vi.fn().mockResolvedValue(makeNorm(200, body));
     const client = makeAuthedClient(mock);
     const since = new Date('2026-06-01T00:00:00Z');
