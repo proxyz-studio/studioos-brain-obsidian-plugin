@@ -21,8 +21,15 @@ export class HeartbeatScheduler {
 
   constructor(opts: HeartbeatSchedulerOpts) {
     this.opts = opts;
-    this.setIntervalFn = opts._setInterval ?? setInterval;
-    this.clearIntervalFn = opts._clearInterval ?? clearInterval;
+    // .bind(globalThis) is mandatory. setInterval/clearInterval are methods of
+    // the global object and require their original `this` binding. Storing
+    // them as instance properties and calling `this.setIntervalFn(...)` strips
+    // that binding and the runtime throws TypeError: Illegal invocation at
+    // load time. The unit tests in HeartbeatScheduler.test.ts inject
+    // `_setInterval`/`_clearInterval`, so they skip the native call entirely
+    // and never caught this — a live install regression in v0.2.0/v0.3.0.
+    this.setIntervalFn = opts._setInterval ?? setInterval.bind(globalThis);
+    this.clearIntervalFn = opts._clearInterval ?? clearInterval.bind(globalThis);
   }
 
   start() {
