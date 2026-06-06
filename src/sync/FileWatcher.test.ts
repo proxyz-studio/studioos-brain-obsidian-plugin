@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FileWatcher } from './FileWatcher';
+import { SyncIndex } from './SyncIndex';
 import { MemoryVaultWriter } from './VaultWriter';
 import { App } from '../__mocks__/obsidian';
 import { BRAIN_MANAGED_DELIMITER } from '../parser/frontmatter';
@@ -38,24 +39,30 @@ describe('FileWatcher', () => {
   let app: App;
   let onError: ReturnType<typeof vi.fn>;
   let fixedNow: Date;
+  let syncIndex: SyncIndex;
+  let persistIndex: () => Promise<void>;
 
   beforeEach(() => {
+    vi.resetAllMocks();
     writer = new MemoryVaultWriter();
     api = makeApi();
     app = new App();
     onError = vi.fn();
     fixedNow = new Date(2026, 5, 6, 14, 37);
+    syncIndex = new SyncIndex();
+    persistIndex = vi.fn().mockResolvedValue(undefined) as unknown as () => Promise<void>;
   });
 
-  function makeWatcher(overrides: { getLastKnownServerHash?: (id: string) => string | null } = {}) {
+  function makeWatcher(overrides: { syncIndex?: SyncIndex } = {}) {
     return new FileWatcher({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       app: app as any,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       api: api as any,
       writer,
+      syncIndex: overrides.syncIndex ?? syncIndex,
+      persistIndex,
       newRequestId: () => 'test-uuid',
-      getLastKnownServerHash: overrides.getLastKnownServerHash ?? ((_id) => null),
       onError,
       _now: () => fixedNow,
     });
@@ -138,8 +145,25 @@ describe('FileWatcher', () => {
     expect((payload as Record<string, unknown>).request_uuid).toBeUndefined();
   });
 
+  it('flush Flow B success updates syncIndex with server-returned brain_id + hash', async () => {
+    const watcher = makeWatcher();
+    writer.files.set('05-BRAIN/new.md', plainContent);
+
+    await watcher.flush('05-BRAIN/new.md');
+
+    expect(api.uploadFlowB).toHaveBeenCalledOnce();
+    // syncIndex must reflect the server-assigned brain_id + hash
+    const entry = syncIndex.getByBrainId('new-id');
+    expect(entry).toBeDefined();
+    expect(entry?.path).toBe('05-BRAIN/new.md');
+    expect(entry?.contentHash).toBe('hash1');
+    expect(persistIndex).toHaveBeenCalledOnce();
+  });
+
   it('flush: file with brain_id + known last_known_server_hash → calls api.uploadFlowC with path', async () => {
-    const watcher = makeWatcher({ getLastKnownServerHash: () => 'known-hash-abc' });
+    // Pre-populate the index with the known hash so Flow C can proceed
+    syncIndex.set({ brainId: 'abc-123', path: '05-BRAIN/item.md', contentHash: 'known-hash-abc' });
+    const watcher = makeWatcher();
     writer.files.set('05-BRAIN/item.md', flowCContent);
 
     await watcher.flush('05-BRAIN/item.md');
@@ -152,8 +176,22 @@ describe('FileWatcher', () => {
     expect(call.content).toBe('user annotation here');
   });
 
+  it('flush Flow C success updates syncIndex with returned hash', async () => {
+    syncIndex.set({ brainId: 'abc-123', path: '05-BRAIN/item.md', contentHash: 'old-hash' });
+    const watcher = makeWatcher();
+    writer.files.set('05-BRAIN/item.md', flowCContent);
+
+    await watcher.flush('05-BRAIN/item.md');
+
+    expect(api.uploadFlowC).toHaveBeenCalledOnce();
+    const entry = syncIndex.getByBrainId('abc-123');
+    expect(entry?.contentHash).toBe('hash2'); // updated to server response hash
+    expect(persistIndex).toHaveBeenCalledOnce();
+  });
+
   it('flush: file with brain_id but UNKNOWN last_known_server_hash → calls onError with skip reason', async () => {
-    const watcher = makeWatcher({ getLastKnownServerHash: () => null });
+    // syncIndex has no entry for abc-123 → hash unknown
+    const watcher = makeWatcher();
     writer.files.set('05-BRAIN/item.md', flowCContent);
 
     await watcher.flush('05-BRAIN/item.md');
@@ -177,7 +215,8 @@ describe('FileWatcher', () => {
       },
     });
 
-    const watcher = makeWatcher({ getLastKnownServerHash: () => 'stale-hash' });
+    syncIndex.set({ brainId: 'abc-123', path: '05-BRAIN/item.md', contentHash: 'stale-hash' });
+    const watcher = makeWatcher();
     writer.files.set('05-BRAIN/item.md', flowCContent);
 
     await watcher.flush('05-BRAIN/item.md');
@@ -201,6 +240,17 @@ describe('FileWatcher', () => {
     expect(onError).toHaveBeenCalledOnce();
     const [msg] = onError.mock.calls[0];
     expect(msg).toContain('Upload failed');
+  });
+
+  it('flush + error response from Flow B → does NOT update index', async () => {
+    api.uploadFlowB.mockResolvedValue({ ok: false, code: 'unauthorized' });
+    const watcher = makeWatcher();
+    writer.files.set('05-BRAIN/note.md', plainContent);
+
+    await watcher.flush('05-BRAIN/note.md');
+
+    expect(syncIndex.getByPath('05-BRAIN/note.md')).toBeUndefined();
+    expect(persistIndex).not.toHaveBeenCalled();
   });
 
   it('flush: file does not exist (deleted between queue and flush) → silently returns', async () => {
@@ -233,8 +283,9 @@ describe('FileWatcher', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       api: api as any,
       writer: blockedWriter as never,
+      syncIndex,
+      persistIndex,
       newRequestId: () => 'test-uuid',
-      getLastKnownServerHash: () => null,
       onError,
       _now: () => fixedNow,
     });
@@ -269,8 +320,9 @@ describe('FileWatcher', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       api: api as any,
       writer,
+      syncIndex,
+      persistIndex,
       newRequestId: () => 'test-uuid',
-      getLastKnownServerHash: () => null,
       onError,
       _now: () => fixedNow,
       _nowMs: () => fakeNow,
@@ -293,8 +345,9 @@ describe('FileWatcher', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       api: api as any,
       writer,
+      syncIndex,
+      persistIndex,
       newRequestId: () => 'test-uuid',
-      getLastKnownServerHash: () => null,
       onError,
       _now: () => fixedNow,
       _nowMs: () => fakeNow,
@@ -312,5 +365,74 @@ describe('FileWatcher', () => {
     expect(api.uploadFlowB).not.toHaveBeenCalled();
 
     vi.useRealTimers();
+  });
+
+  // ---- handleDelete (file-deletion sync) ----
+
+  it('handleDelete: tracked path → calls api.deleteItem + removes from index + persists', async () => {
+    syncIndex.set({ brainId: 'brain-del-1', path: '05-BRAIN/tracked.md', contentHash: 'h1' });
+    const watcher = makeWatcher();
+
+    await watcher.handleDelete('05-BRAIN/tracked.md');
+
+    expect(api.deleteItem).toHaveBeenCalledOnce();
+    expect(api.deleteItem).toHaveBeenCalledWith('brain-del-1');
+    expect(syncIndex.getByPath('05-BRAIN/tracked.md')).toBeUndefined();
+    expect(syncIndex.getByBrainId('brain-del-1')).toBeUndefined();
+    expect(persistIndex).toHaveBeenCalledOnce();
+  });
+
+  it('handleDelete: untracked path → no api call', async () => {
+    const watcher = makeWatcher();
+
+    await watcher.handleDelete('05-BRAIN/never-synced.md');
+
+    expect(api.deleteItem).not.toHaveBeenCalled();
+    expect(persistIndex).not.toHaveBeenCalled();
+  });
+
+  it('handleDelete: path outside 05-BRAIN/ → no api call', async () => {
+    const watcher = makeWatcher();
+
+    await watcher.handleDelete('01-Journal/note.md');
+
+    expect(api.deleteItem).not.toHaveBeenCalled();
+  });
+
+  it('handleDelete: conflict file path → no api call (conflict files are not tracked)', async () => {
+    // Even if somehow the index had this path, conflict files should be filtered early
+    syncIndex.set({ brainId: 'brain-conflict', path: '05-BRAIN/note (conflict 2026-06-06 1437).md', contentHash: 'hc' });
+    const watcher = makeWatcher();
+
+    await watcher.handleDelete('05-BRAIN/note (conflict 2026-06-06 1437).md');
+
+    expect(api.deleteItem).not.toHaveBeenCalled();
+  });
+
+  it('handleDelete: server error → calls onError + index NOT cleared (allows retry)', async () => {
+    api.deleteItem.mockResolvedValue({ ok: false, code: 'not_found' });
+    syncIndex.set({ brainId: 'brain-err', path: '05-BRAIN/errfile.md', contentHash: 'he' });
+    const watcher = makeWatcher();
+
+    await watcher.handleDelete('05-BRAIN/errfile.md');
+
+    expect(onError).toHaveBeenCalledOnce();
+    const [msg] = onError.mock.calls[0];
+    expect(msg).toContain('Delete sync failed');
+    // Index NOT cleared so a retry can still find the brainId
+    expect(syncIndex.getByPath('05-BRAIN/errfile.md')).toBeDefined();
+    expect(persistIndex).not.toHaveBeenCalled();
+  });
+
+  it('handleDelete: network throw → calls onError', async () => {
+    api.deleteItem.mockRejectedValue(new Error('network down'));
+    syncIndex.set({ brainId: 'brain-throw', path: '05-BRAIN/throw.md', contentHash: 'ht' });
+    const watcher = makeWatcher();
+
+    await watcher.handleDelete('05-BRAIN/throw.md');
+
+    expect(onError).toHaveBeenCalledOnce();
+    const [msg] = onError.mock.calls[0];
+    expect(msg).toContain('Delete sync threw');
   });
 });

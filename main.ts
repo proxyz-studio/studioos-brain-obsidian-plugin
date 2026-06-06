@@ -4,6 +4,7 @@ import { ConnectModal } from './src/connect/ConnectModal';
 import { HeartbeatScheduler } from './src/lifecycle/HeartbeatScheduler';
 import { ChangesSyncer } from './src/sync/ChangesSyncer';
 import { FileWatcher } from './src/sync/FileWatcher';
+import { IndexEntry, SyncIndex } from './src/sync/SyncIndex';
 import { ObsidianVaultWriter } from './src/sync/VaultWriter';
 
 type StudioOsBrainSettings = {
@@ -14,6 +15,8 @@ type StudioOsBrainSettings = {
   deviceLabel: string;
   lastChangesSince: string | null;
   lastChangesEtag: string | null;
+  /** Persisted form of the bidirectional path↔brainId↔hash index. Survives plugin reloads. */
+  syncIndexEntries: IndexEntry[];
 };
 
 const DEFAULT_SETTINGS: StudioOsBrainSettings = {
@@ -24,6 +27,7 @@ const DEFAULT_SETTINGS: StudioOsBrainSettings = {
   deviceLabel: 'Unknown device',
   lastChangesSince: null,
   lastChangesEtag: null,
+  syncIndexEntries: [],
 };
 
 export default class StudioOsBrainPlugin extends Plugin {
@@ -32,12 +36,12 @@ export default class StudioOsBrainPlugin extends Plugin {
   private heartbeat: HeartbeatScheduler | null = null;
   private changesSyncer: ChangesSyncer | null = null;
   private fileWatcher: FileWatcher | null = null;
-  /** In-memory map from brain_id → last known server content_hash.
-   *  Populated by /changes responses. Used by FileWatcher to build Flow C payloads. */
-  private brainIdHashes = new Map<string, string>();
+  /** Persistent bidirectional path↔brainId↔hash index. Hydrated from settings on load. */
+  private syncIndex!: SyncIndex;
 
   async onload() {
     await this.loadSettings();
+    this.syncIndex = SyncIndex.fromJSON(this.settings.syncIndexEntries);
 
     this.api = new BrainApiClient({
       baseUrl: this.settings.apiBaseUrl,
@@ -91,6 +95,11 @@ export default class StudioOsBrainPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  async persistIndex(): Promise<void> {
+    this.settings.syncIndexEntries = this.syncIndex.toJSON();
+    await this.saveSettings();
+  }
+
   startHeartbeat() {
     if (this.heartbeat) return; // idempotent
     this.heartbeat = new HeartbeatScheduler({
@@ -141,12 +150,13 @@ export default class StudioOsBrainPlugin extends Plugin {
         console.error('[StudioOS Brain] sync error:', err);
       },
       onChangeApplied: (change) => {
-        // Update in-memory hash map so FileWatcher can compute Flow C payloads.
-        if (change.op === 'upsert') {
-          this.brainIdHashes.set(change.brain_id, change.content_hash);
+        // Update the persistent index so FileWatcher has hash+brainId after reloads.
+        if (change.op === 'upsert' && change.path) {
+          this.syncIndex.set({ brainId: change.brain_id, path: change.path, contentHash: change.content_hash });
         } else {
-          this.brainIdHashes.delete(change.brain_id);
+          this.syncIndex.deleteByBrainId(change.brain_id);
         }
+        void this.persistIndex();
         // Suppress re-upload of the path ChangesSyncer just wrote to break the sync loop (M2).
         if (change.path) this.fileWatcher?.suppressPath(change.path);
       },
@@ -165,8 +175,9 @@ export default class StudioOsBrainPlugin extends Plugin {
       app: this.app,
       api: this.api,
       writer: new ObsidianVaultWriter(this.app),
+      syncIndex: this.syncIndex,
+      persistIndex: () => this.persistIndex(),
       newRequestId: () => crypto.randomUUID(),
-      getLastKnownServerHash: (brainId) => this.brainIdHashes.get(brainId) ?? null,
       onError: (msg, err) => {
         console.warn('[StudioOS Brain] upload skipped:', msg, err);
       },
@@ -220,6 +231,9 @@ class StudioOsBrainSettingTab extends PluginSettingTab {
               this.plugin.settings.vaultName = null;
               this.plugin.settings.lastChangesSince = null;
               this.plugin.settings.lastChangesEtag = null;
+              this.plugin.settings.syncIndexEntries = [];
+              // Reset in-memory index so stale entries don't persist across re-connect
+              this.plugin['syncIndex'] = new SyncIndex();
               await this.plugin.saveSettings();
               new Notice('StudioOS Brain disconnected.');
               this.display(); // re-render the tab

@@ -20,8 +20,9 @@ export function splitBodyAtDelimiter(body: string): BodySplit {
   }
   const brainManaged = body.slice(0, idx).trimEnd();
   let userNotes = body.slice(idx + BRAIN_MANAGED_DELIMITER.length);
-  // Strip leading blank lines + the "## My notes" header that the server's render emits
-  userNotes = userNotes.replace(/^\s*\n/, '');
-  userNotes = userNotes.replace(/^##\s+My notes\s*\n?/, '');
+  // Strip leading whitespace + the "## My notes" header that the server's render emits.
+  // Pattern aligned with server's extractUserNotesSection: /^\s+/ and /^##\s+My notes\s*/.
+  userNotes = userNotes.replace(/^\s+/, '');
+  userNotes = userNotes.replace(/^##\s+My notes\s*/, '');
   return { brainManaged, userNotes: userNotes.trim(), hasDelimiter: true };
 }
