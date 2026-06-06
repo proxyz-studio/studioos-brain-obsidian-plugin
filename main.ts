@@ -59,11 +59,11 @@ export default class StudioOsBrainPlugin extends Plugin {
     this.addSettingTab(new StudioOsBrainSettingTab(this.app, this));
 
     this.addRibbonIcon('brain', 'StudioOS Brain', () => {
-      new Notice(
-        this.settings.token
-          ? 'StudioOS Brain is connected. Open Settings → StudioOS Brain to manage.'
-          : 'StudioOS Brain — open Settings → StudioOS Brain to connect your vault.',
-      );
+      if (this.settings.token) {
+        new Notice(`StudioOS Brain connected to "${this.settings.vaultName ?? 'your vault'}". Notes sync to 05-BRAIN/.`);
+      } else {
+        this.openConnectModal();
+      }
     });
 
     this.addCommand({
@@ -189,6 +189,26 @@ export default class StudioOsBrainPlugin extends Plugin {
     this.fileWatcher?.stop();
     this.fileWatcher = null;
   }
+
+  /** Open the ConnectModal. Called from both the ribbon icon and the Settings tab. */
+  openConnectModal() {
+    new ConnectModal({
+      app: this.app,
+      api: this.api,
+      deviceLabel: this.settings.deviceLabel,
+      existingVaultId: this.settings.vaultId,
+      onSuccess: async ({ token, vaultId, vaultName }) => {
+        this.settings.token = token;
+        this.settings.vaultId = vaultId;
+        this.settings.vaultName = vaultName;
+        await this.saveSettings();
+        this.api.setAuth(token, vaultId);
+        this.startHeartbeat();
+        this.startChangesSyncer();
+        this.startFileWatcher();
+      },
+    }).open();
+  }
 }
 
 class StudioOsBrainSettingTab extends PluginSettingTab {
@@ -244,23 +264,7 @@ class StudioOsBrainSettingTab extends PluginSettingTab {
             .setButtonText('Connect with code')
             .setCta()
             .onClick(() => {
-              new ConnectModal({
-                app: this.app,
-                api: this.plugin.api,
-                deviceLabel: this.plugin.settings.deviceLabel,
-                existingVaultId: this.plugin.settings.vaultId,
-                onSuccess: async ({ token, vaultId, vaultName }) => {
-                  this.plugin.settings.token = token;
-                  this.plugin.settings.vaultId = vaultId;
-                  this.plugin.settings.vaultName = vaultName;
-                  await this.plugin.saveSettings();
-                  this.plugin.api.setAuth(token, vaultId);
-                  this.plugin.startHeartbeat();
-                  this.plugin.startChangesSyncer();
-                  this.plugin.startFileWatcher();
-                  this.display(); // re-render the tab
-                },
-              }).open();
+              this.plugin.openConnectModal();
             });
         }
       });
