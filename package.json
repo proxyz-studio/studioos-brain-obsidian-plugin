@@ -1,6 +1,6 @@
 {
   "name": "studioos-brain-obsidian-plugin",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Syncs your MY 2nd BRAIN items between StudioOS and your Obsidian vault.",
   "main": "main.js",
   "scripts": {

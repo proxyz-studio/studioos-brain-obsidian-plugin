@@ -5,6 +5,7 @@ import { HeartbeatScheduler } from './src/lifecycle/HeartbeatScheduler';
 import { ChangesSyncer } from './src/sync/ChangesSyncer';
 import { FileWatcher } from './src/sync/FileWatcher';
 import { IndexEntry, SyncIndex } from './src/sync/SyncIndex';
+import { VaultMirrorPusher } from './src/sync/VaultMirrorPusher';
 import { ObsidianVaultWriter } from './src/sync/VaultWriter';
 
 type StudioOsBrainSettings = {
@@ -36,6 +37,7 @@ export default class StudioOsBrainPlugin extends Plugin {
   private heartbeat: HeartbeatScheduler | null = null;
   private changesSyncer: ChangesSyncer | null = null;
   private fileWatcher: FileWatcher | null = null;
+  private vaultMirror: VaultMirrorPusher | null = null;
   /** Persistent bidirectional path↔brainId↔hash index. Hydrated from settings on load. */
   private syncIndex!: SyncIndex;
 
@@ -49,11 +51,13 @@ export default class StudioOsBrainPlugin extends Plugin {
       vaultId: this.settings.vaultId,
     });
 
-    // If already connected, start heartbeat + changes syncer + file watcher immediately
+    // If already connected, start heartbeat + changes syncer + file watcher
+    // + vault-mirror pusher immediately
     if (this.settings.token) {
       this.startHeartbeat();
       this.startChangesSyncer();
       this.startFileWatcher();
+      void this.startVaultMirror();
     }
 
     this.addSettingTab(new StudioOsBrainSettingTab(this.app, this));
@@ -84,6 +88,7 @@ export default class StudioOsBrainPlugin extends Plugin {
     this.heartbeat?.stop();
     this.changesSyncer?.stop();
     this.fileWatcher?.stop();
+    this.vaultMirror?.stop();
     console.log('[StudioOS Brain] unloaded');
   }
 
@@ -190,6 +195,30 @@ export default class StudioOsBrainPlugin extends Plugin {
     this.fileWatcher = null;
   }
 
+  /**
+   * Start the vault-mirror pusher (PR H). Walks every markdown file once
+   * and registers vault listeners so subsequent edits flow into the
+   * server's `obsidian_vault_files` cache. Idempotent.
+   */
+  async startVaultMirror() {
+    if (this.vaultMirror) return;
+    this.vaultMirror = new VaultMirrorPusher({
+      app: this.app,
+      api: this.api,
+      log: (msg, ...rest) => console.warn('[StudioOS Brain]', msg, ...rest),
+    });
+    try {
+      await this.vaultMirror.start();
+    } catch (err) {
+      console.warn('[StudioOS Brain] vault mirror failed to start:', err);
+    }
+  }
+
+  stopVaultMirror() {
+    this.vaultMirror?.stop();
+    this.vaultMirror = null;
+  }
+
   /** Open the ConnectModal. Called from both the ribbon icon and the Settings tab. */
   openConnectModal() {
     new ConnectModal({
@@ -206,6 +235,7 @@ export default class StudioOsBrainPlugin extends Plugin {
         this.startHeartbeat();
         this.startChangesSyncer();
         this.startFileWatcher();
+        void this.startVaultMirror();
       },
     }).open();
   }

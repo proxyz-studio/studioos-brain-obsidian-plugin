@@ -211,6 +211,37 @@ export class BrainApiClient {
     return { ok: false, code: (j.code as string | undefined) ?? `http_${res.status}` };
   }
 
+  /**
+   * Push vault-mirror upserts + deletes (PR H / v0.2). Used by the new
+   * `VaultMirrorPusher` to seed the index walk on connect and to stream
+   * incremental change events into the StudioOS server.
+   *
+   * Hard caps on the server: 500 entries per batch, 500kB per file
+   * content. The caller should batch larger walks before invoking.
+   */
+  async pushVaultFiles(payload: {
+    upserts: Array<{
+      path: string;
+      mtime: string; // ISO 8601
+      size_bytes: number;
+      content?: string;
+      content_hash?: string;
+    }>;
+    deletes: string[];
+  }): Promise<{ ok: boolean; status: number; upserted?: number; deleted?: number; code?: string }> {
+    const res = await this.requestFn({
+      url: `${this.baseUrl}/api/brain/sync/vault-files`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
+      body: JSON.stringify(payload),
+    });
+    const j = safeJsonParse(res.text);
+    if (res.status >= 200 && res.status < 300) {
+      return { ok: true, status: res.status, upserted: j.upserted as number | undefined, deleted: j.deleted as number | undefined };
+    }
+    return { ok: false, status: res.status, code: (j.code as string | undefined) ?? (j.error as string | undefined) ?? `http_${res.status}` };
+  }
+
   private authHeaders(): Record<string, string> {
     if (!this.token || !this.vaultId) {
       // Caller should have checked. Send empty to surface a 401 from the server rather than throw client-side.
