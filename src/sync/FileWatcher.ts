@@ -48,8 +48,14 @@ export class FileWatcher {
 
   constructor(opts: FileWatcherOpts) {
     this.opts = opts;
-    this.setTimeoutFn = opts._setTimeout ?? setTimeout;
-    this.clearTimeoutFn = opts._clearTimeout ?? clearTimeout;
+    // .bind(globalThis) is mandatory — see HeartbeatScheduler.ts for context.
+    // setTimeout/clearTimeout are methods of the global object and require
+    // their original `this`. Storing them as instance properties and calling
+    // `this.setTimeoutFn(...)` strips that and throws TypeError: Illegal
+    // invocation at load time. Unit tests inject `_setTimeout`/`_clearTimeout`,
+    // so they skip the native call — this can only be caught by a live install.
+    this.setTimeoutFn = opts._setTimeout ?? setTimeout.bind(globalThis);
+    this.clearTimeoutFn = opts._clearTimeout ?? clearTimeout.bind(globalThis);
     this.nowFn = opts._now ?? (() => new Date());
     this.nowMsFn = opts._nowMs ?? (() => Date.now());
   }

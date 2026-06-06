@@ -42,8 +42,14 @@ export class ChangesSyncer {
 
   constructor(opts: ChangesSyncerOpts) {
     this.opts = opts;
-    this.setIntervalFn = opts._setInterval ?? setInterval;
-    this.clearIntervalFn = opts._clearInterval ?? clearInterval;
+    // .bind(globalThis) is mandatory — see HeartbeatScheduler.ts for context.
+    // setInterval/clearInterval are methods of the global object and require
+    // their original `this`. Storing them as instance properties and calling
+    // `this.setIntervalFn(...)` strips that and throws TypeError: Illegal
+    // invocation at load time. Unit tests inject `_setInterval`/`_clearInterval`,
+    // so they skip the native call — this can only be caught by a live install.
+    this.setIntervalFn = opts._setInterval ?? setInterval.bind(globalThis);
+    this.clearIntervalFn = opts._clearInterval ?? clearInterval.bind(globalThis);
   }
 
   start() {
