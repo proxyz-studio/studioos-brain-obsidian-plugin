@@ -24,6 +24,8 @@ export type NormalizedResponse = {
   headers: Record<string, string>;
   /** Raw response body as a string. Parse with safeJsonParse(). */
   text: string;
+  /** Raw response body as bytes. Required for attachment downloads. */
+  arrayBuffer?: ArrayBuffer;
 };
 
 export type RequestFn = (params: {
@@ -61,6 +63,7 @@ async function defaultRequest(params: {
     status: res.status,
     headers: res.headers ?? {},
     text: res.text ?? '',
+    arrayBuffer: res.arrayBuffer,
   };
 }
 
@@ -206,13 +209,11 @@ export class BrainApiClient {
       headers: this.authHeaders(),
     });
     if (res.status < 200 || res.status >= 300) return null;
-    // requestUrl returns text; we need to decode base64 if the server sends it that way.
-    // However our server returns raw binary. In Obsidian requestUrl, binary responses
-    // are available via the arraybuffer property in newer versions, but for compatibility
-    // we treat the text as-is and let the caller handle encoding.
-    // Actually, requestUrl on Obsidian 1.5+ supports `contentType: 'arraybuffer'` but
-    // the defaultRequest wrapper doesn't expose that. For now we return the text as a
-    // Uint8Array since our attachments are small (< 5 MB).
+    if (res.arrayBuffer) {
+      return { blob: res.arrayBuffer, mime: res.headers['content-type'] ?? 'application/octet-stream' };
+    }
+    // Test/fallback path only. Production defaultRequest exposes Obsidian's
+    // native arrayBuffer; text encoding would corrupt non-text attachments.
     const bytes = new TextEncoder().encode(res.text);
     return { blob: bytes.buffer, mime: res.headers['content-type'] ?? 'application/octet-stream' };
   }

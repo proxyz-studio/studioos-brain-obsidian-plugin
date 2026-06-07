@@ -238,6 +238,40 @@ describe('BrainApiClient.getFile', () => {
 });
 
 // ---------------------------------------------------------------------------
+// fetchAttachmentBlob
+// ---------------------------------------------------------------------------
+
+describe('BrainApiClient.fetchAttachmentBlob', () => {
+  it('returns the raw arrayBuffer when the transport provides binary bytes', async () => {
+    const bytes = new Uint8Array([0, 255, 80, 78, 71]).buffer;
+    const mock = vi.fn().mockResolvedValue({
+      status: 200,
+      headers: { 'content-type': 'image/png' },
+      text: 'would-corrupt-binary-if-used',
+      arrayBuffer: bytes,
+    } satisfies NormalizedResponse);
+    const client = makeAuthedClient(mock);
+
+    const result = await client.fetchAttachmentBlob('att-1');
+
+    expect(result?.mime).toBe('image/png');
+    expect(new Uint8Array(result?.blob ?? new ArrayBuffer(0))).toEqual(new Uint8Array(bytes));
+    const callArg = mock.mock.calls[0][0] as { url: string; headers: Record<string, string> };
+    expect(callArg.url).toBe('https://studioos.proxyz.studio/api/brain/vault/attachment/att-1/blob');
+    expect(callArg.headers.Authorization).toBe('Bearer tok_abc123');
+  });
+
+  it('returns null when the attachment blob endpoint is not successful', async () => {
+    const mock = vi.fn().mockResolvedValue(makeNorm(404, { ok: false, error: 'not_found' }));
+    const client = makeAuthedClient(mock);
+
+    const result = await client.fetchAttachmentBlob('missing');
+
+    expect(result).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // uploadFlowB
 // ---------------------------------------------------------------------------
 
