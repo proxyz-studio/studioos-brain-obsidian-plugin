@@ -17,6 +17,7 @@ type StudioOsBrainSettings = {
   deviceLabel: string;
   lastChangesSince: string | null;
   lastChangesEtag: string | null;
+  lastVaultMirrorSyncedAt: string | null;
   /** Persisted form of the bidirectional path↔brainId↔hash index. Survives plugin reloads. */
   syncIndexEntries: IndexEntry[];
 };
@@ -29,6 +30,7 @@ const DEFAULT_SETTINGS: StudioOsBrainSettings = {
   deviceLabel: 'Unknown device',
   lastChangesSince: null,
   lastChangesEtag: null,
+  lastVaultMirrorSyncedAt: null,
   syncIndexEntries: [],
 };
 
@@ -213,6 +215,10 @@ export default class StudioOsBrainPlugin extends Plugin {
     this.vaultMirror = new VaultMirrorPusher({
       app: this.app,
       api: this.api,
+      onSyncComplete: async () => {
+        this.settings.lastVaultMirrorSyncedAt = new Date().toISOString();
+        await this.saveSettings();
+      },
       log: (msg, ...rest) => console.warn('[StudioOS Brain]', msg, ...rest),
     });
     try {
@@ -225,6 +231,19 @@ export default class StudioOsBrainPlugin extends Plugin {
   stopVaultMirror() {
     this.vaultMirror?.stop();
     this.vaultMirror = null;
+  }
+
+  async syncVaultMirrorNow(): Promise<void> {
+    if (!this.settings.token) {
+      new Notice('StudioOS Brain is not connected.');
+      return;
+    }
+    if (!this.vaultMirror) {
+      await this.startVaultMirror();
+      return;
+    }
+    const result = await this.vaultMirror.syncNow();
+    new Notice(`StudioOS Brain synced ${result.upserted} vault files.`);
   }
 
   /** Open the ConnectModal. Called from both the ribbon icon and the Settings tab. */
@@ -284,11 +303,13 @@ class StudioOsBrainSettingTab extends PluginSettingTab {
               this.plugin.stopHeartbeat();
               this.plugin.stopChangesSyncer();
               this.plugin.stopFileWatcher();
+              this.plugin.stopVaultMirror();
               this.plugin.settings.token = null;
               this.plugin.settings.vaultId = null;
               this.plugin.settings.vaultName = null;
               this.plugin.settings.lastChangesSince = null;
               this.plugin.settings.lastChangesEtag = null;
+              this.plugin.settings.lastVaultMirrorSyncedAt = null;
               this.plugin.settings.syncIndexEntries = [];
               // Reset in-memory index so stale entries don't persist across re-connect
               this.plugin['syncIndex'] = new SyncIndex();
@@ -306,6 +327,24 @@ class StudioOsBrainSettingTab extends PluginSettingTab {
             });
         }
       });
+
+    if (isConnected) {
+      new Setting(containerEl)
+        .setName('Vault index')
+        .setDesc(`Refreshes every 5 minutes. Last sync: ${formatLastSync(this.plugin.settings.lastVaultMirrorSyncedAt)}.`)
+        .addButton((btn) =>
+          btn
+            .setButtonText('Sync now')
+            .onClick(async () => {
+              btn.setDisabled(true).setButtonText('Syncing...');
+              try {
+                await this.plugin.syncVaultMirrorNow();
+              } finally {
+                this.display();
+              }
+            }),
+        );
+    }
 
     new Setting(containerEl)
       .setName('Server URL')
@@ -332,5 +371,16 @@ class StudioOsBrainSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
+  }
+}
+
+function formatLastSync(value: string | null): string {
+  if (!value) {
+    return 'never';
+  }
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return value;
   }
 }
