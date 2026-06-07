@@ -1,7 +1,7 @@
 {
 	"id": "studioos-brain",
 	"name": "StudioOS Brain",
-	"version": "0.3.2",
+	"version": "0.3.3",
 	"minAppVersion": "1.4.0",
 	"description": "Syncs your MY 2nd BRAIN items between StudioOS and your Obsidian vault.",
 	"author": "PROXYZ Studio",
