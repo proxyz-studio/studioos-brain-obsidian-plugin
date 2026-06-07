@@ -1,5 +1,6 @@
 import type { BrainApiClient } from '../api/client';
 import type { PendingAttachment, PendingInit } from '../api/types';
+import type { VaultWriter } from './VaultWriter';
 
 /**
  * Pulls pending server-authored writes (init files + attachments) from StudioOS
@@ -12,50 +13,66 @@ import type { PendingAttachment, PendingInit } from '../api/types';
  */
 export type PendingWritesPullerOpts = {
   api: BrainApiClient;
-  vault: { adapter: { writeBinary(path: string, data: ArrayBuffer): Promise<void>; write(path: string, content: string): Promise<void>; } };
+  writer: VaultWriter;
   onError?: (err: Error) => void;
 };
 
 export class PendingWritesPuller {
   private api: BrainApiClient;
-  private vault: PendingWritesPullerOpts['vault'];
+  private writer: VaultWriter;
   private onError?: (err: Error) => void;
 
   constructor(opts: PendingWritesPullerOpts) {
     this.api = opts.api;
-    this.vault = opts.vault;
+    this.writer = opts.writer;
     this.onError = opts.onError;
   }
 
-  async tick(result: { pendingAttachments: PendingAttachment[]; pendingInits: PendingInit[] }): Promise<void> {
+  async tick(result: { pendingAttachments: PendingAttachment[]; pendingInits: PendingInit[] }): Promise<boolean> {
+    let ok = true;
+
     for (const att of result.pendingAttachments) {
       try {
         const blob = await this.api.fetchAttachmentBlob(att.id);
         if (!blob) {
+          ok = false;
           this.onError?.(new Error(`attachment_blob_missing: ${att.id}`));
           continue;
         }
-        await this.vault.adapter.writeBinary(att.vaultPath, blob.blob);
-        await this.api.postAttachmentApplied(att.id);
+        await this.writer.writeBinary(att.vaultPath, blob.blob);
+        const applied = await this.api.postAttachmentApplied(att.id);
+        if (!applied) {
+          ok = false;
+          this.onError?.(new Error(`attachment_apply_failed: ${att.id}`));
+        }
       } catch (err) {
+        ok = false;
         this.onError?.(err instanceof Error ? err : new Error(String(err)));
       }
     }
 
     for (const init of result.pendingInits) {
       try {
-        await this.vault.adapter.write(init.vaultPath, init.content);
+        await this.writer.write(init.vaultPath, init.content);
       } catch (err) {
+        ok = false;
         this.onError?.(err instanceof Error ? err : new Error(String(err)));
       }
     }
 
     if (result.pendingInits.length > 0) {
       try {
-        await this.api.postInitApplied();
+        const applied = await this.api.postInitApplied();
+        if (!applied) {
+          ok = false;
+          this.onError?.(new Error('init_apply_failed'));
+        }
       } catch (err) {
+        ok = false;
         this.onError?.(err instanceof Error ? err : new Error(String(err)));
       }
     }
+
+    return ok;
   }
 }

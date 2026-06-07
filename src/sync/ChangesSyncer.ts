@@ -76,7 +76,9 @@ export class ChangesSyncer {
       const { since, etag } = this.opts.loadCursor();
       const result = await this.opts.api.getChanges({
         since: since ? new Date(since) : undefined,
-        etag: etag ?? undefined,
+        // Pending writes are retried from the same /changes response. Avoid
+        // sending a stale ETag that could hide still-pending server writes.
+        etag: undefined,
       });
 
       if (result.status === 401) {
@@ -89,12 +91,15 @@ export class ChangesSyncer {
 
       await this.applyChanges(result.data.changes);
 
+      let pendingWritesOk = true;
       if (this.opts.puller) {
-        await this.opts.puller.tick({
+        pendingWritesOk = await this.opts.puller.tick({
           pendingAttachments: result.data.pendingAttachments ?? [],
           pendingInits: result.data.pendingInits ?? [],
         });
       }
+
+      if (!pendingWritesOk) return;
 
       // Persist new cursor — use the largest updated_at in the batch as the next since.
       const newSince = newestUpdatedAt(result.data.changes, since);

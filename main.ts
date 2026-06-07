@@ -132,12 +132,13 @@ export default class StudioOsBrainPlugin extends Plugin {
 
   startChangesSyncer() {
     if (this.changesSyncer) return; // idempotent
+    const writer = new ObsidianVaultWriter(this.app);
     this.changesSyncer = new ChangesSyncer({
       api: this.api,
-      writer: new ObsidianVaultWriter(this.app),
+      writer,
       puller: new PendingWritesPuller({
         api: this.api,
-        vault: this.app.vault as unknown as { adapter: { writeBinary(path: string, data: ArrayBuffer): Promise<void>; write(path: string, content: string): Promise<void>; } },
+        writer,
         onError: (err) => {
           console.error('[StudioOS Brain] pending writes error:', err);
         },
