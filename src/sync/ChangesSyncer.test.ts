@@ -109,8 +109,8 @@ describe('ChangesSyncer', () => {
     vi.clearAllMocks();
   });
 
-  // 1. tick() calls api.getChanges with since + etag from loadCursor
-  it('calls getChanges with since + etag from loadCursor', async () => {
+  // 1. tick() calls api.getChanges with since but intentionally omits stale etag
+  it('calls getChanges with since and omits stale etag so pending writes can retry', async () => {
     const opts = makeOpts(makeChangesResult());
     // Pre-seed cursor so we can assert the values forwarded
     (opts.loadCursor as ReturnType<typeof vi.fn>).mockReturnValue({
@@ -122,7 +122,7 @@ describe('ChangesSyncer', () => {
 
     expect(opts.api.getChanges).toHaveBeenCalledWith({
       since: new Date('2026-05-01T00:00:00.000Z'),
-      etag: '"etag-0"',
+      etag: undefined,
     });
   });
 
@@ -170,6 +170,28 @@ describe('ChangesSyncer', () => {
     await syncer.tick();
 
     expect(opts.saveCursor).toHaveBeenCalledWith('2026-06-02T00:00:00.000Z', '"new-etag"');
+  });
+
+  it('does not save cursor or etag when pending write application fails', async () => {
+    const puller = { tick: vi.fn().mockResolvedValue(false) };
+    const opts = makeOpts(
+      makeChangesResult({
+        data: {
+          changes: [],
+          pendingAttachments: [
+            { id: 'a1', vaultPath: 'Brain/attachments/a.png', mime: 'image/png', sizeBytes: 1, contentHash: 'h1' },
+          ],
+          pendingInits: [],
+          etag: '"pending-etag"',
+        },
+      }),
+      { puller: puller as never },
+    );
+    const syncer = new ChangesSyncer(opts);
+    await syncer.tick();
+
+    expect(puller.tick).toHaveBeenCalled();
+    expect(opts.saveCursor).not.toHaveBeenCalled();
   });
 
   // 5. 304 (notModified) — no writer calls, no saveCursor

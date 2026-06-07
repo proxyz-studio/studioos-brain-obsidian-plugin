@@ -5,6 +5,7 @@ export interface VaultWriter {
   exists(path: string): Promise<boolean>;
   read(path: string): Promise<string>;
   write(path: string, content: string): Promise<void>;
+  writeBinary(path: string, data: ArrayBuffer): Promise<void>;
   delete(path: string): Promise<void>;
   mkdir(path: string): Promise<void>;
 }
@@ -25,6 +26,12 @@ export class ObsidianVaultWriter implements VaultWriter {
     const normalized = normalizePath(path);
     await this.ensureParentDir(normalized);
     await this.app.vault.adapter.write(normalized, content);
+  }
+
+  async writeBinary(path: string, data: ArrayBuffer) {
+    const normalized = normalizePath(path);
+    await this.ensureParentDir(normalized);
+    await this.app.vault.adapter.writeBinary(normalized, data);
   }
 
   async delete(path: string) {
@@ -72,6 +79,11 @@ export class MemoryVaultWriter implements VaultWriter {
   async write(path: string, content: string) {
     this.calls.push({ op: 'write', path, content });
     this.files.set(path, content);
+  }
+
+  async writeBinary(path: string, data: ArrayBuffer) {
+    this.calls.push({ op: 'writeBinary', path, content: String(data.byteLength) });
+    this.files.set(path, Array.from(new Uint8Array(data)).join(','));
   }
 
   async delete(path: string) {
