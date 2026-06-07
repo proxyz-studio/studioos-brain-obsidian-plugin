@@ -3,10 +3,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VaultMirrorPusher } from './VaultMirrorPusher';
 
-// ---------------------------------------------------------------------------
-// Fake vault + api harness
-// ---------------------------------------------------------------------------
-
 type FakeFile = {
   path: string;
   stat?: { mtime: number; size: number };
@@ -18,33 +14,14 @@ function makeApp(initialFiles: FakeFile[] = []) {
   for (const f of initialFiles) {
     filesByPath.set(f.path, f);
   }
-  const listeners: Record<string, Array<(file: unknown, oldPath?: string) => void>> = {
-    create: [], modify: [], delete: [], rename: [],
-  };
-  const eventRefs: Array<{ event: string; id: number }> = [];
 
   const vault: any = {
     getMarkdownFiles: () => Array.from(filesByPath.values()).filter(f => f.path.endsWith('.md')),
-    getAbstractFileByPath: (path: string) => filesByPath.get(path) ?? null,
-    read: async (file: any) => file.content ?? '',
-    on: (event: string, cb: (file: unknown, oldPath?: string) => void) => {
-      listeners[event]?.push(cb);
-      const ref = { event, id: Math.random() };
-      eventRefs.push(ref);
-      return ref;
-    },
-    offref: (ref: any) => {
-      const idx = eventRefs.findIndex(r => r.id === ref.id);
-      if (idx >= 0) eventRefs.splice(idx, 1);
-    },
-    // Test helpers
+    read: vi.fn(async (file: any) => file.content ?? ''),
+    on: vi.fn(),
+    offref: vi.fn(),
     _setFile: (file: FakeFile) => filesByPath.set(file.path, file),
     _removeFile: (path: string) => filesByPath.delete(path),
-    _emit: (event: 'create' | 'modify' | 'delete' | 'rename', file: unknown, oldPath?: string) => {
-      for (const l of listeners[event] ?? []) {
-        l(file, oldPath);
-      }
-    },
   };
   return { app: { vault }, vault };
 }
@@ -60,40 +37,35 @@ function makeApi() {
   return { api, calls };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 describe('VaultMirrorPusher', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
 
-  it('walks every markdown file on start and batches them to the server', async () => {
+  it('walks every markdown file on start and pushes index-only batches', async () => {
     const files: FakeFile[] = Array.from({ length: 5 }, (_, i) => ({
       path: `Brain/note-${i}.md`,
       stat: { mtime: Date.UTC(2026, 5, 6), size: 10 },
       content: `# note ${i}`,
     }));
-    const { app } = makeApp(files);
+    const { app, vault } = makeApp(files);
     const { api, calls } = makeApi();
     const pusher = new VaultMirrorPusher({ app: app as any, api });
 
     await pusher.start();
 
     expect(api.pushVaultFiles).toHaveBeenCalledOnce();
-    const call = calls[0];
-
-    expect(call.upserts).toHaveLength(5);
-    expect(call.upserts[0]).toMatchObject({
+    expect(vault.read).not.toHaveBeenCalled();
+    expect(calls[0]?.upserts).toHaveLength(5);
+    expect(calls[0]?.upserts[0]).toMatchObject({
       path: 'Brain/note-0.md',
       size_bytes: 10,
-      content: '# note 0',
     });
-    expect(call.upserts[0].mtime).toMatch(/^2026-06-06T/);
+    expect(calls[0]?.upserts[0]?.content).toBeUndefined();
+    expect(calls[0]?.upserts[0].mtime).toMatch(/^2026-06-06T/);
   });
 
-  it('skips non-markdown files in the initial walk', async () => {
+  it('skips non-markdown files in the index walk', async () => {
     const { app } = makeApp([
       { path: 'Brain/note.md', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 }, content: 'a' },
       { path: 'Brain/image.png', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 } } as any,
@@ -107,99 +79,75 @@ describe('VaultMirrorPusher', () => {
     expect(calls[0]?.upserts[0]?.path).toBe('Brain/note.md');
   });
 
-  it('pushes the index entry but omits content when the file exceeds the inline cap', async () => {
-    const huge = 'x'.repeat(500_000);
-    const { app } = makeApp([
-      { path: 'Brain/huge.md', stat: { mtime: Date.UTC(2026, 5, 6), size: huge.length }, content: huge },
-    ]);
-    const { api, calls } = makeApi();
-    const pusher = new VaultMirrorPusher({ app: app as any, api });
-
-    await pusher.start();
-
-    expect(calls[0]?.upserts[0]?.content).toBeUndefined();
-    expect(calls[0]?.upserts[0]?.size_bytes).toBe(500_000);
-  });
-
-  it('registers create/modify/delete/rename listeners on start', async () => {
+  it('does not register vault create/modify/delete/rename listeners', async () => {
     const { app, vault } = makeApp([]);
     const { api } = makeApi();
     const pusher = new VaultMirrorPusher({ app: app as any, api });
 
     await pusher.start();
 
-    // The fake vault tracks how many listeners are active via the eventRefs array.
-    // Four listeners (create, modify, delete, rename) implies 4 registered events.
-    expect(vault.on).toBeDefined();
+    expect(vault.on).not.toHaveBeenCalled();
     expect(pusher.isRunning).toBe(true);
   });
 
-  it('debounces a burst of modify events into one push', async () => {
-    const { app, vault } = makeApp([]);
-    const { api, calls } = makeApi();
-    const pusher = new VaultMirrorPusher({ app: app as any, api });
-
-    await pusher.start();
-    calls.length = 0;
-
-    vault._setFile({ path: 'Brain/draft.md', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 }, content: 'a' });
-    vault._emit('modify', vault._getFile?.('Brain/draft.md') ?? { path: 'Brain/draft.md' });
-    vault._emit('modify', { path: 'Brain/draft.md' });
-    vault._emit('modify', { path: 'Brain/draft.md' });
-
-    await vi.advanceTimersByTimeAsync(2000);
-
-    expect(api.pushVaultFiles).toHaveBeenCalledTimes(1);
-    expect(calls[0]?.upserts).toHaveLength(1);
-    expect(calls[0]?.upserts[0]?.path).toBe('Brain/draft.md');
-  });
-
-  it('rename queues a delete of the old path + an upsert of the new path', async () => {
-    const { app, vault } = makeApp([]);
-    const { api, calls } = makeApi();
-    const pusher = new VaultMirrorPusher({ app: app as any, api });
-
-    await pusher.start();
-    calls.length = 0;
-
-    vault._setFile({ path: 'Brain/new.md', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 }, content: 'a' });
-    vault._emit('rename', { path: 'Brain/new.md' }, 'Brain/old.md');
-
-    await vi.advanceTimersByTimeAsync(2000);
-
-    expect(calls[0]?.upserts.map((u: any) => u.path)).toEqual(['Brain/new.md']);
-    expect(calls[0]?.deletes).toEqual(['Brain/old.md']);
-  });
-
-  it('delete event flushes a delete batch', async () => {
-    const { app, vault } = makeApp([]);
-    const { api, calls } = makeApi();
-    const pusher = new VaultMirrorPusher({ app: app as any, api });
-
-    await pusher.start();
-    calls.length = 0;
-
-    vault._emit('delete', { path: 'Brain/gone.md' });
-    await vi.advanceTimersByTimeAsync(2000);
-
-    expect(api.pushVaultFiles).toHaveBeenCalledTimes(1);
-    expect(calls[0]?.deletes).toEqual(['Brain/gone.md']);
-    expect(calls[0]?.upserts).toEqual([]);
-  });
-
-  it('stop() removes listeners and cancels pending flushes', async () => {
+  it('refreshes the index on the configured interval', async () => {
     const { app, vault } = makeApp([
       { path: 'Brain/seed.md', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 }, content: 'a' },
     ]);
-    const { api } = makeApi();
-    const pusher = new VaultMirrorPusher({ app: app as any, api });
+    const { api, calls } = makeApi();
+    const pusher = new VaultMirrorPusher({ app: app as any, api, intervalMs: 1000 });
 
     await pusher.start();
-    vault._emit('modify', { path: 'Brain/draft.md' });
+    vault._setFile({ path: 'Brain/next.md', stat: { mtime: Date.UTC(2026, 5, 7), size: 2 }, content: 'b' });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(api.pushVaultFiles).toHaveBeenCalledTimes(2);
+    expect(calls[1]?.upserts.map(u => u.path).sort()).toEqual(['Brain/next.md', 'Brain/seed.md']);
+  });
+
+  it('syncNow runs a manual refresh and calls onSyncComplete', async () => {
+    const { app } = makeApp([
+      { path: 'Brain/manual.md', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 }, content: 'a' },
+    ]);
+    const { api } = makeApi();
+    const onSyncComplete = vi.fn();
+    const pusher = new VaultMirrorPusher({ app: app as any, api, onSyncComplete });
+
+    const result = await pusher.syncNow();
+
+    expect(result).toEqual({ batches: 1, upserted: 1, deleted: 0 });
+    expect(onSyncComplete).toHaveBeenCalledWith({ batches: 1, upserted: 1, deleted: 0 });
+  });
+
+  it('sends deletes for paths missing from a later scheduled walk', async () => {
+    const { app, vault } = makeApp([
+      { path: 'Brain/keep.md', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 }, content: 'a' },
+      { path: 'Brain/remove.md', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 }, content: 'b' },
+    ]);
+    const { api, calls } = makeApi();
+    const pusher = new VaultMirrorPusher({ app: app as any, api, intervalMs: 1000 });
+
+    await pusher.start();
+    calls.length = 0;
+    vault._removeFile('Brain/remove.md');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(api.pushVaultFiles).toHaveBeenCalledTimes(2);
+    expect(calls[0]?.deletes).toEqual(['Brain/remove.md']);
+  });
+
+  it('stop cancels scheduled refreshes', async () => {
+    const { app } = makeApp([
+      { path: 'Brain/seed.md', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 }, content: 'a' },
+    ]);
+    const { api } = makeApi();
+    const pusher = new VaultMirrorPusher({ app: app as any, api, intervalMs: 1000 });
+
+    await pusher.start();
     pusher.stop();
     await vi.advanceTimersByTimeAsync(3000);
 
-    expect(api.pushVaultFiles).toHaveBeenCalledTimes(1); // only the initial walk; the debounced modify was cancelled
+    expect(api.pushVaultFiles).toHaveBeenCalledTimes(1);
     expect(pusher.isRunning).toBe(false);
   });
 
