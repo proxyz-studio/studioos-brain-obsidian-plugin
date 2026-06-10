@@ -1,6 +1,7 @@
 import type { TFile, Vault } from 'obsidian';
 
 import type { BrainApiClient } from '../api/client';
+import { sha256Hex } from './contentHash';
 
 /**
  * Maximum upserts per server batch. Mirrors the cap on
@@ -9,6 +10,8 @@ import type { BrainApiClient } from '../api/client';
 const BATCH_SIZE = 250;
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
+const DAILY_NOTE_CONTENT_MAX_BYTES = 200_000;
+const DAILY_NOTE_PATH_RE = /(?:^|\/)(?:Daily Notes|01-DAILY)\/\d{4}-\d{2}-\d{2}\.md$/;
 
 /**
  * Skip files that obviously aren't user-authored Obsidian content. We
@@ -123,7 +126,7 @@ export class VaultMirrorPusher {
       for (let i = 0; i < Math.max(files.length, deletes.length); i += BATCH_SIZE) {
         const batch = files.slice(i, i + BATCH_SIZE);
         const deleteBatch = deletes.slice(i, i + BATCH_SIZE);
-        const upserts = this.buildUpserts(batch);
+        const upserts = await this.buildUpserts(batch);
         if (upserts.length === 0 && deleteBatch.length === 0) {
           continue;
         }
@@ -144,12 +147,14 @@ export class VaultMirrorPusher {
     }
   }
 
-  private buildUpserts(files: TFile[]): Array<{
+  private async buildUpserts(files: TFile[]): Promise<Array<{
     path: string;
     mtime: string;
     size_bytes: number;
-  }> {
-    const out: Array<{ path: string; mtime: string; size_bytes: number }> = [];
+    content?: string;
+    content_hash?: string;
+  }>> {
+    const out: Array<{ path: string; mtime: string; size_bytes: number; content?: string; content_hash?: string }> = [];
     for (const file of files) {
       const stat = file.stat;
       const mtime = stat?.mtime ? new Date(stat.mtime).toISOString() : new Date().toISOString();
@@ -159,6 +164,15 @@ export class VaultMirrorPusher {
         mtime,
         size_bytes: sizeBytes,
       };
+      if (shouldMirrorDailyNoteContent(file.path, sizeBytes)) {
+        const content = await this.app.vault.read(file);
+        out.push({
+          ...entry,
+          content,
+          content_hash: await sha256Hex(content),
+        });
+        continue;
+      }
       out.push(entry);
     }
     return out;
@@ -171,4 +185,8 @@ function isSupportedExtension(path: string): boolean {
     return false;
   }
   return SUPPORTED_EXTENSIONS.has(path.slice(dot + 1).toLowerCase());
+}
+
+function shouldMirrorDailyNoteContent(path: string, sizeBytes: number): boolean {
+  return sizeBytes <= DAILY_NOTE_CONTENT_MAX_BYTES && DAILY_NOTE_PATH_RE.test(path);
 }

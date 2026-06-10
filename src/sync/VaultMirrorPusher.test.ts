@@ -65,6 +65,49 @@ describe('VaultMirrorPusher', () => {
     expect(calls[0]?.upserts[0].mtime).toMatch(/^2026-06-06T/);
   });
 
+  it('includes content for small daily notes so StudioOS Today can render them', async () => {
+    const files: FakeFile[] = [
+      {
+        path: '01-DAILY/2026-06-10.md',
+        stat: { mtime: Date.UTC(2026, 5, 10, 1), size: 24 },
+        content: '# Wednesday\n\nReal note.',
+      },
+      {
+        path: 'Daily Notes/2026-06-10.md',
+        stat: { mtime: Date.UTC(2026, 5, 10, 1), size: 19 },
+        content: '# Default daily.',
+      },
+      {
+        path: 'Brain/note.md',
+        stat: { mtime: Date.UTC(2026, 5, 10, 1), size: 8 },
+        content: '# Normal',
+      },
+    ];
+    const { app, vault } = makeApp(files);
+    const { api, calls } = makeApi();
+    const pusher = new VaultMirrorPusher({ app: app as any, api });
+
+    await pusher.start();
+
+    expect(vault.read).toHaveBeenCalledTimes(2);
+    expect(calls[0]?.upserts).toHaveLength(3);
+    expect(calls[0]?.upserts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: '01-DAILY/2026-06-10.md',
+        content: '# Wednesday\n\nReal note.',
+        content_hash: expect.any(String),
+      }),
+      expect.objectContaining({
+        path: 'Daily Notes/2026-06-10.md',
+        content: '# Default daily.',
+        content_hash: expect.any(String),
+      }),
+    ]));
+    const normalNote = calls[0]?.upserts.find(u => u.path === 'Brain/note.md');
+    expect(normalNote?.content).toBeUndefined();
+    expect(normalNote?.content_hash).toBeUndefined();
+  });
+
   it('skips non-markdown files in the index walk', async () => {
     const { app } = makeApp([
       { path: 'Brain/note.md', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 }, content: 'a' },
