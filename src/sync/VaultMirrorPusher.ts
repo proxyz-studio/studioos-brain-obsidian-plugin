@@ -12,7 +12,7 @@ const BATCH_SIZE = 250;
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
 const STARTUP_RETRY_MS = 30 * 1000;
 const DAILY_NOTE_CONTENT_MAX_BYTES = 200_000;
-const DAILY_NOTE_PATH_RE = /(?:^|\/)(?:Daily Notes|01-DAILY)\/\d{4}-\d{2}-\d{2}\.md$/;
+const DAILY_NOTE_PATH_RE = /(?:^|\/)(?:Daily Notes|01-DAILY)(?:\/.*)?\/\d{4}-\d{2}-\d{2}\.md$/;
 
 /**
  * Skip files that obviously aren't user-authored Obsidian content. We
@@ -256,10 +256,7 @@ function shouldMirrorDailyNoteContent(path: string, sizeBytes: number): boolean 
 }
 
 function isTodayDailyNotePath(path: string, dateIso: string): boolean {
-  return path === `Daily Notes/${dateIso}.md`
-    || path === `01-DAILY/${dateIso}.md`
-    || path.endsWith(`/Daily Notes/${dateIso}.md`)
-    || path.endsWith(`/01-DAILY/${dateIso}.md`);
+  return new RegExp(String.raw`(?:^|/)(?:Daily Notes|01-DAILY)(?:/.*)?/${escapeRegExp(dateIso)}\.md$`).test(path);
 }
 
 function formatLocalDateIso(date: Date): string {
@@ -267,4 +264,8 @@ function formatLocalDateIso(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

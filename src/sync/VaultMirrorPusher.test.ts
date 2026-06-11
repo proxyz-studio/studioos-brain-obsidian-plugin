@@ -78,6 +78,11 @@ describe('VaultMirrorPusher', () => {
         content: '# Default daily.',
       },
       {
+        path: '01-DAILY/2026/2026-06/2026-W24/2026-06-10.md',
+        stat: { mtime: Date.UTC(2026, 5, 10, 1), size: 25 },
+        content: '# Nested daily note.',
+      },
+      {
         path: 'Brain/note.md',
         stat: { mtime: Date.UTC(2026, 5, 10, 1), size: 8 },
         content: '# Normal',
@@ -89,8 +94,8 @@ describe('VaultMirrorPusher', () => {
 
     await pusher.start();
 
-    expect(vault.read).toHaveBeenCalledTimes(2);
-    expect(calls[0]?.upserts).toHaveLength(3);
+    expect(vault.read).toHaveBeenCalledTimes(3);
+    expect(calls[0]?.upserts).toHaveLength(4);
     expect(calls[0]?.upserts).toEqual(expect.arrayContaining([
       expect.objectContaining({
         path: '01-DAILY/2026-06-10.md',
@@ -102,6 +107,11 @@ describe('VaultMirrorPusher', () => {
         content: '# Default daily.',
         content_hash: expect.any(String),
       }),
+      expect.objectContaining({
+        path: '01-DAILY/2026/2026-06/2026-W24/2026-06-10.md',
+        content: '# Nested daily note.',
+        content_hash: expect.any(String),
+      }),
     ]));
     const normalNote = calls[0]?.upserts.find(u => u.path === 'Brain/note.md');
     expect(normalNote?.content).toBeUndefined();
@@ -111,7 +121,7 @@ describe('VaultMirrorPusher', () => {
   it('pushes today\'s daily note content in a dedicated safety pass', async () => {
     const files: FakeFile[] = [
       {
-        path: '01-DAILY/2026-06-11.md',
+        path: '01-DAILY/2026/2026-06/2026-W24/2026-06-11.md',
         stat: { mtime: Date.UTC(2026, 5, 11, 6, 36), size: 28 },
         content: '# Thursday\n\nToday matters.',
       },
@@ -136,7 +146,7 @@ describe('VaultMirrorPusher', () => {
     expect(calls[1]?.deletes).toEqual([]);
     expect(calls[1]?.upserts).toEqual([
       expect.objectContaining({
-        path: '01-DAILY/2026-06-11.md',
+        path: '01-DAILY/2026/2026-06/2026-W24/2026-06-11.md',
         content: '# Thursday\n\nToday matters.',
         content_hash: expect.any(String),
       }),
