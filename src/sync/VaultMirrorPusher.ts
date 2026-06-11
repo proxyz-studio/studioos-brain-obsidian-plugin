@@ -10,6 +10,7 @@ import { sha256Hex } from './contentHash';
 const BATCH_SIZE = 250;
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000;
+const STARTUP_RETRY_MS = 30 * 1000;
 const DAILY_NOTE_CONTENT_MAX_BYTES = 200_000;
 const DAILY_NOTE_PATH_RE = /(?:^|\/)(?:Daily Notes|01-DAILY)\/\d{4}-\d{2}-\d{2}\.md$/;
 
@@ -35,6 +36,10 @@ export type VaultMirrorPusherOptions = {
   /** Test-only timer injection. */
   _setInterval?: typeof setInterval;
   _clearInterval?: typeof clearInterval;
+  _setTimeout?: typeof setTimeout;
+  _clearTimeout?: typeof clearTimeout;
+  /** Test-only clock injection. */
+  _now?: () => Date;
 };
 
 /**
@@ -58,8 +63,12 @@ export class VaultMirrorPusher {
   private log: (msg: string, ...rest: unknown[]) => void;
   private setIntervalFn: typeof setInterval;
   private clearIntervalFn: typeof clearInterval;
+  private setTimeoutFn: typeof setTimeout;
+  private clearTimeoutFn: typeof clearTimeout;
+  private now: () => Date;
 
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
+  private startupRetryHandle: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private syncing = false;
   private knownPaths = new Set<string>();
@@ -72,6 +81,9 @@ export class VaultMirrorPusher {
     this.log = opts.log ?? (() => {});
     this.setIntervalFn = opts._setInterval ?? setInterval.bind(globalThis);
     this.clearIntervalFn = opts._clearInterval ?? clearInterval.bind(globalThis);
+    this.setTimeoutFn = opts._setTimeout ?? setTimeout.bind(globalThis);
+    this.clearTimeoutFn = opts._clearTimeout ?? clearTimeout.bind(globalThis);
+    this.now = opts._now ?? (() => new Date());
   }
 
   /** Whether the pusher is currently registered + running. */
@@ -89,6 +101,12 @@ export class VaultMirrorPusher {
     }
     this.running = true;
     await this.syncNow();
+    // Obsidian can load community plugins before the vault file cache is fully
+    // hydrated. A short second pass makes the Today card reliable after app
+    // startup instead of waiting for the five-minute interval.
+    this.startupRetryHandle = this.setTimeoutFn(() => {
+      void this.syncNow();
+    }, STARTUP_RETRY_MS);
     this.intervalHandle = this.setIntervalFn(() => {
       void this.syncNow();
     }, this.intervalMs);
@@ -103,6 +121,10 @@ export class VaultMirrorPusher {
     if (this.intervalHandle) {
       this.clearIntervalFn(this.intervalHandle);
       this.intervalHandle = null;
+    }
+    if (this.startupRetryHandle) {
+      this.clearTimeoutFn(this.startupRetryHandle);
+      this.startupRetryHandle = null;
     }
   }
 
@@ -139,6 +161,18 @@ export class VaultMirrorPusher {
           this.log('[vault-mirror] push failed', res);
         }
       }
+
+      const todayUpserts = await this.buildTodayDailyNoteUpserts(files);
+      if (todayUpserts.length > 0) {
+        const res = await this.api.pushVaultFiles({ upserts: todayUpserts, deletes: [] });
+        batches += 1;
+        if (res.ok) {
+          upserted += res.upserted ?? todayUpserts.length;
+        } else {
+          this.log('[vault-mirror] today daily note push failed', res);
+        }
+      }
+
       this.knownPaths = currentPaths;
       await this.onSyncComplete?.({ batches, upserted, deleted });
       return { batches, upserted, deleted };
@@ -177,6 +211,36 @@ export class VaultMirrorPusher {
     }
     return out;
   }
+
+  private async buildTodayDailyNoteUpserts(files: TFile[]): Promise<Array<{
+    path: string;
+    mtime: string;
+    size_bytes: number;
+    content: string;
+    content_hash: string;
+  }>> {
+    const dateIso = formatLocalDateIso(this.now());
+    const out: Array<{ path: string; mtime: string; size_bytes: number; content: string; content_hash: string }> = [];
+
+    for (const file of files) {
+      const stat = file.stat;
+      const sizeBytes = stat?.size ?? 0;
+      if (!isTodayDailyNotePath(file.path, dateIso) || sizeBytes > DAILY_NOTE_CONTENT_MAX_BYTES) {
+        continue;
+      }
+
+      const content = await this.app.vault.read(file);
+      out.push({
+        path: file.path,
+        mtime: stat?.mtime ? new Date(stat.mtime).toISOString() : this.now().toISOString(),
+        size_bytes: sizeBytes,
+        content,
+        content_hash: await sha256Hex(content),
+      });
+    }
+
+    return out;
+  }
 }
 
 function isSupportedExtension(path: string): boolean {
@@ -189,4 +253,18 @@ function isSupportedExtension(path: string): boolean {
 
 function shouldMirrorDailyNoteContent(path: string, sizeBytes: number): boolean {
   return sizeBytes <= DAILY_NOTE_CONTENT_MAX_BYTES && DAILY_NOTE_PATH_RE.test(path);
+}
+
+function isTodayDailyNotePath(path: string, dateIso: string): boolean {
+  return path === `Daily Notes/${dateIso}.md`
+    || path === `01-DAILY/${dateIso}.md`
+    || path.endsWith(`/Daily Notes/${dateIso}.md`)
+    || path.endsWith(`/01-DAILY/${dateIso}.md`);
+}
+
+function formatLocalDateIso(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }

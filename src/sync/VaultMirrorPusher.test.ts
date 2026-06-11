@@ -108,6 +108,41 @@ describe('VaultMirrorPusher', () => {
     expect(normalNote?.content_hash).toBeUndefined();
   });
 
+  it('pushes today\'s daily note content in a dedicated safety pass', async () => {
+    const files: FakeFile[] = [
+      {
+        path: '01-DAILY/2026-06-11.md',
+        stat: { mtime: Date.UTC(2026, 5, 11, 6, 36), size: 28 },
+        content: '# Thursday\n\nToday matters.',
+      },
+      {
+        path: 'Brain/note.md',
+        stat: { mtime: Date.UTC(2026, 5, 11, 6, 37), size: 8 },
+        content: '# Normal',
+      },
+    ];
+    const { app } = makeApp(files);
+    const { api, calls } = makeApi();
+    const pusher = new VaultMirrorPusher({
+      app: app as any,
+      api,
+      _now: () => new Date('2026-06-11T09:00:00.000Z'),
+    });
+
+    const result = await pusher.syncNow();
+
+    expect(api.pushVaultFiles).toHaveBeenCalledTimes(2);
+    expect(result.batches).toBe(2);
+    expect(calls[1]?.deletes).toEqual([]);
+    expect(calls[1]?.upserts).toEqual([
+      expect.objectContaining({
+        path: '01-DAILY/2026-06-11.md',
+        content: '# Thursday\n\nToday matters.',
+        content_hash: expect.any(String),
+      }),
+    ]);
+  });
+
   it('skips non-markdown files in the index walk', async () => {
     const { app } = makeApp([
       { path: 'Brain/note.md', stat: { mtime: Date.UTC(2026, 5, 6), size: 1 }, content: 'a' },
@@ -146,6 +181,32 @@ describe('VaultMirrorPusher', () => {
 
     expect(api.pushVaultFiles).toHaveBeenCalledTimes(2);
     expect(calls[1]?.upserts.map(u => u.path).sort()).toEqual(['Brain/next.md', 'Brain/seed.md']);
+  });
+
+  it('runs one delayed startup retry after Obsidian has hydrated files', async () => {
+    const { app, vault } = makeApp([]);
+    const { api, calls } = makeApi();
+    const pusher = new VaultMirrorPusher({ app: app as any, api, intervalMs: 60_000 });
+
+    await pusher.start();
+    vault._setFile({ path: 'Brain/loaded-after-start.md', stat: { mtime: Date.UTC(2026, 5, 11), size: 1 }, content: 'a' });
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(api.pushVaultFiles).toHaveBeenCalledTimes(1);
+    expect(calls[0]?.upserts.map(u => u.path)).toEqual(['Brain/loaded-after-start.md']);
+  });
+
+  it('cancels the delayed startup retry on stop', async () => {
+    const { app, vault } = makeApp([]);
+    const { api } = makeApi();
+    const pusher = new VaultMirrorPusher({ app: app as any, api });
+
+    await pusher.start();
+    pusher.stop();
+    vault._setFile({ path: 'Brain/loaded-after-stop.md', stat: { mtime: Date.UTC(2026, 5, 11), size: 1 }, content: 'a' });
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(api.pushVaultFiles).not.toHaveBeenCalled();
   });
 
   it('syncNow runs a manual refresh and calls onSyncComplete', async () => {
